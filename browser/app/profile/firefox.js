@@ -3117,6 +3117,8 @@ pref("devtools.inspector.activeSidebar", "layoutview");
 pref("devtools.inspector.three-pane-enabled", true);
 // Enable the 3 pane mode in the chrome inspector
 pref("devtools.inspector.chrome.three-pane-enabled", false);
+// Splitter orientation: "landscape", "portrait", or "auto" (width-based)
+pref("devtools.inspector.split-orientation", "auto");
 // Collapse pseudo-elements by default in the rule-view
 pref("devtools.inspector.show_pseudo_elements", false);
 // The default size for image preview tooltips in the rule-view/computed-view/markup-view
