@@ -295,7 +295,7 @@ static nscoord GetBaselinePosition(nsTextFrame* aFrame,
 
     case StyleDominantBaseline::TextBottom:
     case StyleDominantBaseline::Ideographic:
-      return writingMode.IsVerticalLR() ? 0 : ascent + descent;
+      return convertIfVerticalRL(ascent + descent);
 
     case StyleDominantBaseline::Central:
       return (ascent + descent) / 2.0;
@@ -2766,10 +2766,9 @@ void SVGTextDrawPathCallbacks::StrokeGeometry() {
         SVGElement::FromNode(mFrame->GetParent()->GetContent());
 
     // Apply any stroke-specific transform
-    if (Maybe<gfxMatrix> outerSVGToUser =
+    if (Maybe<gfxMatrix> userToOuterSVG =
             SVGUtils::GetNonScalingStrokeTransform(mFrame)) {
-      outerSVGToUser->Invert();
-      mContext.Multiply(*outerSVGToUser);
+      mContext.Multiply(userToOuterSVG->Inverse());
     }
 
     RefPtr<Path> path = mContext.GetPath();

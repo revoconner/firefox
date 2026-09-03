@@ -2,6 +2,13 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+## Monitor Toolbar Button
+
+# Toolbar button that opens the panel where the user creates a monitor
+smartwindow-monitor-button =
+    .label = Monitors
+    .tooltiptext = Monitors
+
 ## AI Tasks
 
 # Desktop notification shown when a AI Tasks fires. A "monitor" is
@@ -218,3 +225,81 @@ ai-tasks-alert-last-result-not-met = Last result: No match
 
 ai-tasks-alert-condition-met = Match
 ai-tasks-alert-condition-not-met = No match
+
+## AI Tab - A page generated from the content of the user's tabs
+
+# Title given to a generated page when the model returns no title of its own and
+# the user did not say what the page should focus on.
+ai-tab-default-page-title = Generated page
+
+# Shown in place of a generated page when it can no longer be found, for
+# example because the user deleted it.
+ai-tab-page-unavailable = This page isn’t available anymore.
+
+# Shown in place of a generated page when it could not be loaded.
+ai-tab-page-error = Something went wrong loading this page.
+
+## Smartbar command palette
+## Slash commands shown in the smartbar when the user types "/".
+
+# Group header for the agent task commands (for example, /watch).
+smartbar-command-tasks-header = Tasks
+# The /watch command creates a task that watches a page for changes.
+smartbar-command-watch-label = /watch
+smartbar-command-watch-description = Get notified when pages change
+# Footer note shown at the bottom of the command palette, hinting that more
+# task command types will be added later.
+smartbar-command-coming-soon = More types of tasks are coming soon
+
+## Smart Form Fill
+
+ai-smart-form-fill-autocomplete-label = Smart Form Fill
+ai-smart-form-fill-autocomplete-loading = Loading…
+ai-smart-form-fill-autocomplete-sources-label = Sources:
+ai-smart-form-fill-autocomplete-choose-tabs = You need to choose some relevant tabs
+ai-smart-form-fill-autocomplete-open-tabs = You need to open some tabs
+
+# Sources are what tabs the Smart Form Fill should use to generate field values
+ai-smart-form-fill-edit-sources = Edit sources
+ai-smart-form-fill-suggested-tabs = Suggested tabs
+ai-smart-form-fill-other-tabs = Other tabs
+
+# Variables:
+#   $tabTitle (string) - Title of the tab controlled by the toggle
+ai-smart-form-fill-tab-select-toggle =
+    .aria-label = Toggle tab selection for “{ $tabTitle }”
+
+ai-smart-form-fill-cancel-tab-select =
+    .label = Cancel
+
+ai-smart-form-fill-accept-tab-select =
+    .label = Done
+
+ai-smart-form-fill-fill-form =
+    .label = Fill form
+
+ai-smart-form-fill-review-heading = Review suggestions
+ai-smart-form-fill-review-description = Edit or delete anything that’s not correct.
+
+ai-smart-form-fill-field =
+    .label = Field
+
+ai-smart-form-fill-cancel-review =
+    .label = Cancel
+
+ai-smart-form-fill-finding-suggestions = Finding suggestions
+
+ai-smart-form-fill-stop-finding-suggestions =
+    .aria-label = Stop finding suggestions
+
+ai-smart-form-fill-success-heading = Form filled with suggestions
+ai-smart-form-fill-success-description = Check the form. Review the filled fields and update anything that looks off or missing before submitting.
+
+ai-smart-form-fill-no-suggestions-heading = No suggestions found
+ai-smart-form-fill-no-suggestions-description = Smart Form Fill wasn’t able to generate any suggestions for this form.
+
+ai-smart-form-fill-error-heading = Something happened catch-all headline
+ai-smart-form-fill-error-description = General explanation that maybe its the connection, or something else happened, and to try again
+
+ai-smart-form-fill-close-review =
+    .label = Close

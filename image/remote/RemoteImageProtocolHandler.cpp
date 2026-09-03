@@ -57,7 +57,7 @@ static UniqueContentParentKeepAlive GetLaunchingContentParentForDecode(
   // We use the extension process as a fallback, because
   // it is usually running, and should be OK to parse images.
   return ContentParent::GetNewOrUsedLaunchingBrowserProcess(
-      EXTENSION_REMOTE_TYPE,
+      dom::RemoteType(dom::RemoteType::Kind::Extension),
       /* aGroup */ nullptr,
       /* aPriority */ hal::PROCESS_PRIORITY_FOREGROUND,
       /* aPreferUsed */ true);
@@ -273,7 +273,7 @@ RemoteImageProtocolHandler::GetImageSurface(imgIContainer* aContainer,
     gfxContext context(drawTarget);
 
     SVGImageContext svgContext;
-    svgContext.SetViewportSize(Some(CSSIntSize(size.width, size.height)));
+    svgContext.SetViewportSize(Some(CSSSize(size.width, size.height)));
     svgContext.SetColorScheme(Some(aColorScheme));
 
     ImgDrawResult res = aContainer->Draw(

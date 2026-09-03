@@ -5,6 +5,7 @@
 #ifdef XP_WIN
 #  include "WMF.h"
 #  include "WMFDecoderModule.h"
+#  include "WMFEncoderModule.h"
 #endif
 #include "FFVPXRuntimeLinker.h"
 #include "GLContextProvider.h"
@@ -447,7 +448,8 @@ mozilla::ipc::IPCResult GPUParent::RecvInitSandboxTesting(
 mozilla::ipc::IPCResult GPUParent::RecvInitCompositorManager(
     Endpoint<PCompositorManagerParent>&& aEndpoint, uint32_t aNamespace) {
   CompositorManagerParent::Create(std::move(aEndpoint), ContentParentId(),
-                                  aNamespace, /* aIsRoot */ true);
+                                  aNamespace, /* aContentBridgeNamespace */ 0,
+                                  /* aIsRoot */ true);
   return IPC_OK();
 }
 
@@ -515,6 +517,7 @@ mozilla::ipc::IPCResult GPUParent::RecvUpdateVar(
           []() {
 #ifdef XP_WIN
             WMFDecoderModule::Init();
+            WMFEncoderModule::ClearCache();
 #endif
             if (StaticPrefs::media_ffvpx_hw_enabled()) {
               FFVPXRuntimeLinker::Init();
@@ -600,8 +603,10 @@ mozilla::ipc::IPCResult GPUParent::RecvSimulateDeviceReset() {
 
 mozilla::ipc::IPCResult GPUParent::RecvNewContentCompositorManager(
     Endpoint<PCompositorManagerParent>&& aEndpoint,
-    const ContentParentId& aChildId, uint32_t aNamespace) {
+    const ContentParentId& aChildId, uint32_t aNamespace,
+    uint32_t aContentBridgeNamespace) {
   CompositorManagerParent::Create(std::move(aEndpoint), aChildId, aNamespace,
+                                  aContentBridgeNamespace,
                                   /* aIsRoot */ false);
   return IPC_OK();
 }

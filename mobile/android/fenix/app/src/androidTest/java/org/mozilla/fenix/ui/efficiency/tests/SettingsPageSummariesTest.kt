@@ -10,7 +10,7 @@ import org.mozilla.fenix.ui.efficiency.helpers.BaseTest
 import org.mozilla.fenix.ui.efficiency.selectors.SettingsPageSummariesSelectors
 import org.mozilla.fenix.ui.efficiency.selectors.SettingsSelectors
 
-class SettingsPageSummariesTest : BaseTest(shakeToSummarizeFeatureFlagEnabled = true) {
+class SettingsPageSummariesTest : BaseTest() {
 
     // TestRail link: https://mozilla.testrail.io/index.php?/cases/view/4036042
     @SmokeTest
@@ -20,13 +20,15 @@ class SettingsPageSummariesTest : BaseTest(shakeToSummarizeFeatureFlagEnabled = 
 
         // When: we open the Settings screen
         // Then: the "Page summaries" entry is present
-        on.settings.navigateToPage()
+        on.settings
+            .navigateToPage()
             .mozSwipeTo(SettingsSelectors.PAGE_SUMMARIES_BUTTON)
             .mozVerify(SettingsSelectors.PAGE_SUMMARIES_BUTTON)
 
         // When: we open the Page summaries sub-menu
         // Then: the Page summaries view and all its options are displayed
-        on.settingsPageSummaries.navigateToPage()
+        on.settingsPageSummaries
+            .navigateToPage()
             .mozVerify(SettingsPageSummariesSelectors.PAGE_SUMMARIES_TOOLBAR_TITLE)
             .mozVerify(SettingsSelectors.GO_BACK_BUTTON)
             .mozVerify(SettingsPageSummariesSelectors.SUMMARIZE_PAGES_OPTION)

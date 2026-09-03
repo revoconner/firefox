@@ -8,7 +8,7 @@
  * utility methods for subclasses, and so forth.
  */
 
-#include "mozilla/dom/Element.h"
+#include "Element.h"
 
 #include <inttypes.h>
 
@@ -584,7 +584,7 @@ void Element::SetCustomElementRegistry(
   }
 }
 
-void Element::SetKeepCustomElementRegistryNull() {
+void Element::SetNullCustomElementRegistry() {
   MOZ_ASSERT(StaticPrefs::dom_scoped_custom_element_registries_enabled());
   MOZ_ASSERT(!HasCustomElementRegistry(),
              "We shouldn't set a custom element registry without clearing "
@@ -1605,10 +1605,10 @@ already_AddRefed<ShadowRoot> Element::AttachShadowWithoutNameChecks(
   return shadowRoot.forget();
 }
 
-void Element::AttachAndSetUAShadowRoot(NotifyUAWidget aNotifyUAWidget,
-                                       DelegatesFocus aDelegatesFocus,
-                                       CustomSlotDispatch aCustomSlotDispatch,
-                                       bool aNotify) {
+void Element::AttachAndSetUAShadowRoot(
+    NotifyUAWidget aNotifyUAWidget, DelegatesFocus aDelegatesFocus /* = No */,
+    CustomSlotDispatch aCustomSlotDispatch /* = No */,
+    bool aNotify /* = true*/) {
   MOZ_DIAGNOSTIC_ASSERT(!CanAttachShadowDOM(),
                         "Cannot be used to attach UA shadow DOM");
   if (OwnerDoc()->IsStaticDocument()) {
@@ -1625,13 +1625,34 @@ void Element::AttachAndSetUAShadowRoot(NotifyUAWidget aNotifyUAWidget,
   }
 
   MOZ_ASSERT(GetShadowRoot()->IsUAWidget());
-  if (aNotifyUAWidget == NotifyUAWidget::Yes) {
-    NotifyUAWidgetSetupOrChange();
+  if (aNotifyUAWidget == NotifyUAWidget::No) {
+    return;
   }
+
+  // Note that this method may be called during a BindToTree() or
+  // UnbindFromTree() calls. Then, we shouldn't run script synchronously.
+  // Therefore, we want to make this dispatch the chrome event asynchronously to
+  // avoid to mark this method, BindToTree() and UnbindFromTree() as
+  // MOZ_CAN_RUN_SCRIPT.
+  MOZ_ASSERT(!nsContentUtils::IsSafeToRunScript(),
+             "Block running script before calling "
+             "Element::AttachAndSetUAShadowRoot!");
+
+  AddScriptRunnerToNotifyUAWidgetSetupOrChange();
 }
 
-void Element::NotifyUAWidgetSetupOrChange() {
+void Element::AddScriptRunnerToNotifyUAWidgetSetupOrChange() {
   MOZ_ASSERT(IsInComposedDoc());
+
+  // Note that this method may be called during a BindToTree() or
+  // UnbindFromTree() calls. Then, we shouldn't run script synchronously.
+  // Therefore, we want to make this dispatch the chrome event asynchronously to
+  // avoid to mark this method, BindToTree() and UnbindFromTree() as
+  // MOZ_CAN_RUN_SCRIPT.
+  MOZ_ASSERT(!nsContentUtils::IsSafeToRunScript(),
+             "Block running script before calling "
+             "Element::AddScriptRunnerToNotifyUAWidgetSetupOrChange!");
+
   Document* doc = OwnerDoc();
   if (doc->IsStaticDocument()) {
     return;
@@ -1644,15 +1665,15 @@ void Element::NotifyUAWidgetSetupOrChange() {
   // UA Widget to re-init.
   nsContentUtils::AddScriptRunner(NS_NewRunnableFunction(
       "Element::NotifyUAWidgetSetupOrChange::UAWidgetSetupOrChange",
-      [self = RefPtr<Element>(this), doc = RefPtr<Document>(doc)]() {
-        nsContentUtils::DispatchChromeEvent(doc, self,
-                                            u"UAWidgetSetupOrChange"_ns,
+      [self = RefPtr<Element>(this)]() MOZ_CAN_RUN_SCRIPT_BOUNDARY_LAMBDA {
+        nsContentUtils::DispatchChromeEvent(self, u"UAWidgetSetupOrChange"_ns,
                                             CanBubble::eYes, Cancelable::eNo);
       }));
 }
 
-void Element::TeardownUAShadowRoot(NotifyUAWidget aNotify,
-                                   UnattachShadowRoot aUnattachShadowRoot) {
+void Element::TeardownUAShadowRoot(
+    NotifyUAWidget aNotifyUAWidget,
+    UnattachShadowRoot aUnattachShadowRoot /* = Yes */) {
   MOZ_ASSERT(IsInComposedDoc());
   if (!GetShadowRoot()) {
     return;
@@ -1662,9 +1683,18 @@ void Element::TeardownUAShadowRoot(NotifyUAWidget aNotify,
     UnattachShadow();
   }
 
-  if (aNotify == NotifyUAWidget::No) {
+  if (aNotifyUAWidget == NotifyUAWidget::No) {
     return;
   }
+
+  // Note that this method may be called during a BindToTree() or
+  // UnbindFromTree() calls. Then, we shouldn't run script synchronously.
+  // Therefore, we want to make this dispatch the chrome event asynchronously to
+  // avoid to mark this method, BindToTree() and UnbindFromTree() as
+  // MOZ_CAN_RUN_SCRIPT.
+  MOZ_ASSERT(!nsContentUtils::IsSafeToRunScript(),
+             "Block running script before calling "
+             "Element::TeardownUAShadowRoot!");
 
   Document* doc = OwnerDoc();
   if (doc->IsStaticDocument()) {
@@ -1674,19 +1704,20 @@ void Element::TeardownUAShadowRoot(NotifyUAWidget aNotify,
   // The runnable will dispatch an event to tear down UA Widget.
   nsContentUtils::AddScriptRunner(NS_NewRunnableFunction(
       "Element::NotifyUAWidgetTeardownAndUnattachShadow::UAWidgetTeardown",
-      [self = RefPtr<Element>(this), doc = RefPtr<Document>(doc)]() {
-        // Bail out if the element is being collected by CC
-        bool hasHadScriptObject = true;
-        nsIScriptGlobalObject* scriptObject =
-            doc->GetScriptHandlingObject(hasHadScriptObject);
-        if (!scriptObject && hasHadScriptObject) {
-          return;
-        }
+      [self = RefPtr<Element>(this), doc = RefPtr<Document>(doc)]()
+          MOZ_CAN_RUN_SCRIPT_BOUNDARY_LAMBDA {
+            // Bail out if the element is being collected by CC
+            bool hasHadScriptObject = true;
+            nsIScriptGlobalObject* scriptObject =
+                doc->GetScriptHandlingObject(hasHadScriptObject);
+            if (!scriptObject && hasHadScriptObject) {
+              return;
+            }
 
-        (void)nsContentUtils::DispatchChromeEvent(
-            doc, self, u"UAWidgetTeardown"_ns, CanBubble::eYes,
-            Cancelable::eNo);
-      }));
+            (void)nsContentUtils::DispatchChromeEvent(
+                doc, self, u"UAWidgetTeardown"_ns, CanBubble::eYes,
+                Cancelable::eNo);
+          }));
 }
 
 void Element::UnattachShadow() {
@@ -3395,14 +3426,24 @@ nsresult Element::SetInlineStyleDeclaration(StyleLockedDeclarationBlock&,
   return NS_ERROR_NOT_IMPLEMENTED;
 }
 
-NS_IMETHODIMP_(bool)
-Element::IsAttributeMapped(const nsAtom* aAttribute) const { return false; }
-
-nsMapRuleToAttributesFunc Element::GetAttributeMappingFunction() const {
-  return &MapNoAttributesInto;
+bool Element::IsNoNamespaceAttrMapped(const nsAtom* aAttribute) const {
+  return false;
 }
 
-void Element::MapNoAttributesInto(mozilla::MappedDeclarationsBuilder&) {}
+nsMapRuleToAttributesFunc Element::GetAttributeMappingFunction() const {
+  return &MapXmlLangAttrInto;
+}
+
+void Element::MapXmlLangAttrInto(mozilla::MappedDeclarationsBuilder& aBuilder) {
+  const auto* value = aBuilder.GetAttr(kNameSpaceID_XML, nsGkAtoms::lang);
+  if (!value) {
+    return;
+  }
+  MOZ_ASSERT(value->Type() == nsAttrValue::eAtom);
+  // We set it unconditionally, if xml:lang and lang are both specified, this
+  // one wins, and is the caller's responsibility to call this last.
+  aBuilder.SetIdentAtomValue(eCSSProperty__x_lang, value->GetAtomValue());
+}
 
 nsChangeHint Element::GetAttributeChangeHint(const nsAtom* aAttribute,
                                              AttrModType) const {
@@ -3863,7 +3904,8 @@ static MOZ_ALWAYS_INLINE void SetLifecycleCallbackNamespaceURI(
 
 nsresult Element::SetNoNameSpaceAttrOnNewlyCreatedElement(
     already_AddRefed<nsAtom> aName, nsHtml5String& aValue,
-    bool& aIsPendingMappedAttributeEvaluation) {
+    bool& aIsPendingMappedAttributeEvaluation,
+    const nsAutoScriptBlocker& aGuard) {
   MOZ_ASSERT(aValue);
   MOZ_ASSERT(IsHTMLElement());
   MOZ_ASSERT(!GetParentNode());
@@ -4015,14 +4057,18 @@ nsresult Element::SetNoNameSpaceAttrOnNewlyCreatedElement(
   const nsAttrValue* valuePtr =
       mAttrs.AddNewAttributeAssumeAvailableSlot(nameRef, value);
   UpdateSubtreeBloomFilterForAttribute(namePtr);
-  if (!aIsPendingMappedAttributeEvaluation && IsAttributeMapped(namePtr)) {
+  if (!aIsPendingMappedAttributeEvaluation &&
+      IsNoNamespaceAttrMapped(namePtr)) {
     aIsPendingMappedAttributeEvaluation = true;
     mAttrs.InfallibleMarkAsPendingPresAttributeEvaluation();
     // Not calling `Document::ScheduleForPresAttrEvaluation` since not in doc.
   }
 
   // No `dir` handling, because the element has neither ancestors nor
-  // descendants, yet.
+  // descendants, yet. Except we might need to invalidate DefinitelyLTR.
+  if (namePtr == nsGkAtoms::dir) {
+    MaybeSetDocNeedsDirHandling(this, valuePtr);
+  }
 
   // No check for `HasElementCreatedFromPrototypeAndHasUnmodifiedL10n()`, since
   // we only call this from the HTML parser and not from the prototype content
@@ -4063,18 +4109,19 @@ nsresult Element::SetAttrAndNotify(
       hadValidDir = HasValidDir() || IsHTMLElement(nsGkAtoms::bdi);
       hadDirAuto = HasDirAuto();  // already takes bdi into account
     }
-
     MOZ_TRY(SetAndSwapAttr(aName, aParsedValue, &oldValueSet, aIsKnownNew));
-    if (IsAttributeMapped(aName) && !IsPendingMappedAttributeEvaluation()) {
-      mAttrs.InfallibleMarkAsPendingPresAttributeEvaluation();
-      if (Document* doc = GetComposedDoc()) {
-        doc->ScheduleForPresAttrEvaluation(this);
-      }
-    }
   } else {
     RefPtr<mozilla::dom::NodeInfo> ni = NodeInfoManager()->GetNodeInfo(
         aName, aPrefix, aNamespaceID, ATTRIBUTE_NODE);
     MOZ_TRY(SetAndSwapAttr(ni, aParsedValue, &oldValueSet, aIsKnownNew));
+  }
+
+  if (IsAttrMapped(aNamespaceID, aName) &&
+      !IsPendingMappedAttributeEvaluation()) {
+    mAttrs.InfallibleMarkAsPendingPresAttributeEvaluation();
+    if (Document* doc = GetComposedDoc()) {
+      doc->ScheduleForPresAttrEvaluation(this);
+    }
   }
 
   // If the old value owns its own data, we know it is OK to keep using it.
@@ -4447,16 +4494,16 @@ nsresult Element::UnsetAttr(int32_t aNameSpaceID, nsAtom* aName, bool aNotify) {
   bool hadValidDir = false;
   bool hadDirAuto = false;
 
-  if (aNameSpaceID == kNameSpaceID_None) {
-    if (aName == nsGkAtoms::dir) {
-      hadValidDir = HasValidDir() || IsHTMLElement(nsGkAtoms::bdi);
-      hadDirAuto = HasDirAuto();  // already takes bdi into account
-    }
-    if (IsAttributeMapped(aName) && !IsPendingMappedAttributeEvaluation()) {
-      mAttrs.InfallibleMarkAsPendingPresAttributeEvaluation();
-      if (Document* doc = GetComposedDoc()) {
-        doc->ScheduleForPresAttrEvaluation(this);
-      }
+  if (aNameSpaceID == kNameSpaceID_None && aName == nsGkAtoms::dir) {
+    hadValidDir = HasValidDir() || IsHTMLElement(nsGkAtoms::bdi);
+    hadDirAuto = HasDirAuto();  // already takes bdi into account
+  }
+
+  if (IsAttrMapped(aNameSpaceID, aName) &&
+      !IsPendingMappedAttributeEvaluation()) {
+    mAttrs.InfallibleMarkAsPendingPresAttributeEvaluation();
+    if (Document* doc = GetComposedDoc()) {
+      doc->ScheduleForPresAttrEvaluation(this);
     }
   }
 
@@ -5132,7 +5179,8 @@ already_AddRefed<Promise> Element::RequestFullscreen(
   if (const char* error = GetFullscreenError(aCallerType, OwnerDoc())) {
     request->Reject(error);
   } else {
-    OwnerDoc()->RequestFullscreen(std::move(request));
+    const RefPtr<Document> doc = OwnerDoc();
+    doc->RequestFullscreen(std::move(request));
   }
   return promise.forget();
 }

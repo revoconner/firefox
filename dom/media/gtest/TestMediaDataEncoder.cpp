@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "AOMDecoder.h"
 #include "AnnexB.h"
 #include "BufferReader.h"
 #include "H264.h"
@@ -768,6 +769,66 @@ TEST_F(MediaDataEncoderTest, H264AVCC) {
 }
 #endif
 
+#ifdef XP_MACOSX
+static already_AddRefed<MediaData> CreateNV12Frame(const gfx::IntSize& aSize) {
+  layers::PlanarYCbCrData data;
+  data.mPictureRect = gfx::IntRect(0, 0, aSize.width, aSize.height);
+  data.mYStride = aSize.width;
+  data.mCbCrStride = aSize.width;
+  data.mChromaSubsampling = gfx::ChromaSubsampling::HALF_WIDTH_AND_HEIGHT;
+  data.mCbSkip = 1;
+  data.mCrSkip = 1;
+  const auto ySize = data.YDataSize();
+  const auto cbcrSize = data.CbCrDataSize();
+  const size_t yBytes = static_cast<size_t>(data.mYStride) * ySize.height;
+  const size_t cbcrBytes =
+      static_cast<size_t>(data.mCbCrStride) * cbcrSize.height;
+  auto buffer = MakeUnique<uint8_t[]>(yBytes + cbcrBytes);
+  std::fill_n(buffer.get(), yBytes, static_cast<uint8_t>(235));
+  std::fill_n(buffer.get() + yBytes, cbcrBytes, static_cast<uint8_t>(128));
+  data.mYChannel = buffer.get();
+  data.mCbChannel = buffer.get() + yBytes;
+  data.mCrChannel = data.mCbChannel + 1;
+  RefPtr<layers::NVImage> image = new layers::NVImage();
+  if (NS_FAILED(image->SetData(data))) {
+    return nullptr;
+  }
+  RefPtr<MediaData> frame = VideoData::CreateFromImage(
+      aSize, 0, media::TimeUnit::Zero(),
+      media::TimeUnit::FromMicroseconds(FRAME_DURATION), image, true,
+      media::TimeUnit::Zero());
+  return frame.forget();
+}
+
+TEST_F(MediaDataEncoderTest, H264EncodeNV12Input) {
+  RUN_IF_SUPPORTED(CodecType::H264, []() {
+    const gfx::IntSize size(640, 480);
+    RefPtr<MediaDataEncoder> encoder = CreateH264Encoder(
+        Usage::Record,
+        EncoderConfig::SampleFormat(dom::ImageBitmapFormat::YUV420SP_NV12),
+        size, ScalabilityMode::None, AsVariant(kH264SpecificAVCC));
+    if (!encoder) {
+      return;
+    }
+    ASSERT_TRUE(EnsureInit(encoder));
+    RefPtr<MediaData> frame = CreateNV12Frame(size);
+    ASSERT_TRUE(frame);
+    auto encoded = WaitFor(encoder->Encode(frame));
+    ASSERT_TRUE(encoded.isOk());
+    MediaDataEncoder::EncodedData output = encoded.unwrap();
+    auto drained = Drain(encoder);
+    ASSERT_TRUE(drained.isOk());
+    output.AppendElements(std::move(drained.unwrap()));
+    WaitForShutdown(encoder);
+    CheckH264EncodeOutput(output, 1, 1, Usage::Record,
+                          /* aIs4KOrLarger */ false,
+                          /* aIsAVCC */ true,
+                          /* aToleratesKeyframeDrop */ false);
+  });
+}
+
+#endif
+
 // For Android HW encoder only.
 #ifdef MOZ_WIDGET_ANDROID
 TEST_F(MediaDataEncoderTest, AndroidNotSupportedSize) {
@@ -1294,6 +1355,43 @@ TEST_F(MediaDataEncoderTest, SmallDownsampledInput) {
       << "small downsampled input was dropped instead of consumed";
 
   WaitForShutdown(e);
+}
+
+TEST_F(MediaDataEncoderTest, AV1SignalsColorConfigInSequenceHeader) {
+  RUN_IF_SUPPORTED(CodecType::AV1, [this]() {
+    // Different from the CICP defaults, so the assertions fail unless the
+    // values were signaled.
+    mData.mYUV.mYUVColorSpace = gfx::YUVColorSpace::BT2020;
+    mData.mYUV.mColorPrimaries = gfx::ColorSpace2::BT2020;
+    mData.mYUV.mTransferFunction = gfx::TransferFunction::PQ;
+    mData.mYUV.mColorRange = gfx::ColorRange::FULL;
+
+    RefPtr<MediaDataEncoder> e = CreateVideoEncoder(
+        CodecType::AV1, Usage::Record,
+        EncoderConfig::SampleFormat(
+            dom::ImageBitmapFormat::YUV420P,
+            EncoderConfig::VideoColorSpace(
+                gfx::ColorRange::FULL, gfx::YUVColorSpace::BT2020,
+                gfx::ColorSpace2::BT2020, gfx::TransferFunction::PQ)),
+        kImageSize, ScalabilityMode::None, AsVariant(void_t{}));
+    EXPECT_TRUE(EnsureInit(e));
+
+    MediaDataEncoder::EncodedData output =
+        GET_OR_RETURN_ON_ERROR(Encode(e, 1UL, mData));
+    EXPECT_EQ(output.Length(), 1UL);
+
+    AOMDecoder::AV1SequenceInfo info;
+    MediaResult seq = AOMDecoder::ReadSequenceHeaderInfo(
+        Span(output[0]->Data(), output[0]->Size()), info);
+    ASSERT_EQ(seq.Code(), NS_OK)
+        << "first packet must contain the sequence header";
+    EXPECT_EQ(info.mColorSpace.mPrimaries, gfx::CICP::CP_BT2020);
+    EXPECT_EQ(info.mColorSpace.mTransfer, gfx::CICP::TC_SMPTE2084);
+    EXPECT_EQ(info.mColorSpace.mMatrix, gfx::CICP::MC_BT2020_NCL);
+    EXPECT_EQ(info.mColorSpace.mRange, gfx::ColorRange::FULL);
+
+    WaitForShutdown(e);
+  });
 }
 
 #undef BLOCK_SIZE

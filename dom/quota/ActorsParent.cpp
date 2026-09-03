@@ -233,7 +233,7 @@ namespace {
  * Constants
  ******************************************************************************/
 
-const uint32_t kSQLitePageSizeOverride = 512;
+const uint32_t kSQLitePageSizeOverride = 4096;
 
 // Important version history:
 // - Bug 1290481 bumped our schema from major.minor 2.0 to 3.0 in Firefox 57
@@ -254,7 +254,7 @@ const uint32_t kSQLitePageSizeOverride = 512;
 const uint32_t kMajorStorageVersion = 2;
 
 // Minor storage version. Bump for backwards-compatible changes.
-const uint32_t kMinorStorageVersion = 3;
+const uint32_t kMinorStorageVersion = 4;
 
 // The storage version we store in the SQLite database is a (signed) 32-bit
 // integer. The major version is left-shifted 16 bits so the max value is
@@ -3087,7 +3087,14 @@ nsresult QuotaManager::LoadQuota() {
           // doing that. We just need to use correct group and last access
           // time before initializing quota for the given origin.
 
-          if (fullOriginMetadata.mDirty) {
+          const bool needsRescan =
+#if defined(NIGHTLY_BUILD) || defined(DEBUG)
+              !fullOriginMetadata.CheckIfUsageIsConsistent(
+                  "LoadQuotaFromCache"_ns);
+#else
+              false;
+#endif
+          if (fullOriginMetadata.mDirty || needsRescan) {
             aDirtyOrigins.AppendElement(std::move(fullOriginMetadata));
           } else if (IsBestEffortPersistenceType(
                          /* Persistent origins are initialized separately */
@@ -3151,6 +3158,14 @@ nsresult QuotaManager::LoadQuota() {
       // We could not read the database.
       isCacheUseAllowed = false;
     } else if (!dirtyOrigins.IsEmpty()) {
+      // Make sure mUsageModificationDisabled is false, otherwise origin will
+      // not be processed in QuotaManager::InitQuotaForOrigin. After a shutdown
+      // and reinitialization cycle (e.g. when storage was cleared),
+      // RemoveQuota sets mUsageModificationDisabled to true.
+      // InitializeFlushTimer would also clear it, but it runs after this
+      // code path.
+      mUsageModificationDisabled.store(false);
+
       nsTArray<RenameAndInitInfo> renameAndInitInfos;
       nsTArray<FullOriginMetadata> failedOrigins;
       for (auto& dirtyOrigin : dirtyOrigins) {
@@ -4301,7 +4316,11 @@ Result<Ok, nsresult> QuotaManager::InitializeOriginDirectory(
 
     if (StaticPrefs::dom_quotaManager_loadQuotaFromSecondaryCache() &&
         IsInitializableQuotaVersion(metadata.mQuotaVersion) &&
-        !metadata.mAccessed) {
+        !metadata.mAccessed
+#if defined(NIGHTLY_BUILD) || defined(DEBUG)
+        && metadata.CheckIfUsageIsConsistent("InitializeOriginDirectory"_ns)
+#endif
+    ) {
       QM_LOG(("Initializing quota for: %s", metadata.mOrigin.get()));
       InitQuotaForOrigin(metadata, /* aDirectoryExists */ true, aCacheMap);
 
@@ -5091,6 +5110,38 @@ nsresult QuotaManager::UpgradeStorageFrom2_2To2_3(
                                innerFunc);
 }
 
+nsresult QuotaManager::UpgradeStorageFrom2_3To2_4(
+    mozIStorageConnection* aConnection) {
+  AssertIsOnIOThread();
+  MOZ_ASSERT(aConnection);
+
+  const auto innerFunc = [&aConnection](const auto&) -> nsresult {
+#ifdef DEBUG
+    {
+      QM_TRY_INSPECT(
+          const int32_t& storageVersion,
+          MOZ_TO_RESULT_INVOKE_MEMBER(aConnection, GetSchemaVersion));
+
+      MOZ_ASSERT(storageVersion == MakeStorageVersion(2, 3));
+    }
+#endif
+
+    QM_TRY(MOZ_TO_RESULT(aConnection->ExecuteSimpleSQL(nsPrintfCString(
+        "PRAGMA page_size = %" PRIu32 ";", kSQLitePageSizeOverride))));
+
+    QM_TRY(MOZ_TO_RESULT(
+        aConnection->ExecuteSimpleSQL("PRAGMA auto_vacuum = INCREMENTAL;"_ns)));
+
+    QM_TRY(
+        MOZ_TO_RESULT(aConnection->SetSchemaVersion(MakeStorageVersion(2, 4))));
+
+    return NS_OK;
+  };
+
+  return ExecuteInitialization(Initialization::UpgradeStorageFrom2_3To2_4,
+                               innerFunc);
+}
+
 nsresult QuotaManager::MaybeRemoveLocalStorageDataAndArchive(
     nsIFile& aLsArchiveFile) {
   AssertIsOnIOThread();
@@ -5527,12 +5578,17 @@ nsresult QuotaManager::MaybeCreateOrUpgradeStorage(
         QM_TRY(MOZ_TO_RESULT(aConnection.ExecuteSimpleSQL(nsPrintfCString(
             "PRAGMA page_size = %" PRIu32 ";", kSQLitePageSizeOverride))));
       }
+
+      QM_TRY(MOZ_TO_RESULT(aConnection.ExecuteSimpleSQL(
+          "PRAGMA auto_vacuum = INCREMENTAL;"_ns)));
     }
 
     mozStorageTransaction transaction(
         &aConnection, false, mozIStorageConnection::TRANSACTION_IMMEDIATE);
 
     QM_TRY(MOZ_TO_RESULT(transaction.Start()));
+
+    bool vacuum = false;
 
     // An upgrade method can upgrade the database, the storage or both.
     // The upgrade loop below can only be avoided when there's no database and
@@ -5555,7 +5611,7 @@ nsresult QuotaManager::MaybeCreateOrUpgradeStorage(
                            "VALUES (0)"))));
     } else {
       // This logic needs to change next time we change the storage!
-      static_assert(kStorageVersion == int32_t((2 << 16) + 3),
+      static_assert(kStorageVersion == int32_t((2 << 16) + 4),
                     "Upgrade function needed due to storage version increase.");
 
       while (storageVersion != kStorageVersion) {
@@ -5569,6 +5625,9 @@ nsresult QuotaManager::MaybeCreateOrUpgradeStorage(
           QM_TRY(MOZ_TO_RESULT(UpgradeStorageFrom2_1To2_2(&aConnection)));
         } else if (storageVersion == MakeStorageVersion(2, 2)) {
           QM_TRY(MOZ_TO_RESULT(UpgradeStorageFrom2_2To2_3(&aConnection)));
+        } else if (storageVersion == MakeStorageVersion(2, 3)) {
+          QM_TRY(MOZ_TO_RESULT(UpgradeStorageFrom2_3To2_4(&aConnection)));
+          vacuum = true;
         } else {
           QM_FAIL(NS_ERROR_FAILURE, []() {
             NS_WARNING(
@@ -5585,6 +5644,14 @@ nsresult QuotaManager::MaybeCreateOrUpgradeStorage(
     }
 
     QM_TRY(MOZ_TO_RESULT(transaction.Commit()));
+
+    // Best-effort VACUUM to apply the page_size and auto_vacuum PRAGMAs
+    // set inside UpgradeStorageFrom2_3To2_4. If it fails, the database
+    // remains functional with the old page size.
+    if (vacuum) {
+      QM_WARNONLY_TRY(
+          MOZ_TO_RESULT(aConnection.ExecuteSimpleSQL("VACUUM;"_ns)));
+    }
   }
 
   return NS_OK;
@@ -5855,6 +5922,29 @@ nsresult QuotaManager::EnsureStorageIsInitializedInternal() {
             IsDatabaseCorruptionError,
             // Fallback.
             ErrToDefaultOk<nsCOMPtr<mozIStorageConnection>>));
+
+    // OpenUnsharedDatabase only validates the SQLite header
+    // (page 1). Internal corruption (such as freelist inconsistency from
+    // an interrupted schema migration) passes the open check but breaks
+    // all subsequent storage operations. Run a quick integrity check to
+    // catch this class of corruption; if it fails, close and null the
+    // connection so the nuke-and-rebuild path below handles recovery.
+    // See bug 2065480 for details.
+    if (connection) {
+      QM_WARNONLY_TRY(DatabasePassesIntegrityCheck(*connection)
+                          .andThen([](bool ok) -> Result<Ok, nsresult> {
+                            return ok ? Result<Ok, nsresult>{Ok{}}
+                                      : Err(NS_ERROR_FILE_CORRUPTED);
+                          }),
+                      // Clean-up: called if DatabasePassesIntegrityCheck failed
+                      // or found that the database is corrupted (!ok)
+                      [&](const auto&) {
+                        // Reset the connection to force database file to be
+                        // recreated
+                        connection->Close();
+                        connection = nullptr;
+                      });
+    }
 
     bool storageFileWasCorrupted = false;
 
@@ -8285,7 +8375,7 @@ std::pair<uint64_t, uint64_t> QuotaManager::GetUsageAndLimitForEstimate(
             // reports its own origin usage against that limit.
             if (originInfo && originInfo->LockedPersisted()) {
               return std::pair(originInfo->LockedUsage(),
-                               mTemporaryStorageLimit);
+                               static_cast<uint64_t>(mTemporaryStorageLimit));
             }
           }
 
@@ -8677,7 +8767,7 @@ QuotaManager::GetOriginInfosExceedingGlobalLimit() const {
       },
       [temporaryStorageUsage = mTemporaryStorageUsage,
        temporaryStorageLimit = mTemporaryStorageLimit,
-       doomedUsage = uint64_t{0}](const auto& originInfo) mutable {
+       doomedUsage = int64_t{0}](const auto& originInfo) mutable {
         if (temporaryStorageUsage - doomedUsage <= temporaryStorageLimit) {
           return true;
         }

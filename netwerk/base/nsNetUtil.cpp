@@ -2150,6 +2150,31 @@ nsresult NS_GetSanitizedURIStringFromURI(nsIURI* aUri,
   return rv;
 }
 
+void NS_GetSanitizedSpecFromSpec(const nsACString& aSpec,
+                                 nsACString& aSanitizedSpec) {
+  aSanitizedSpec.Assign(aSpec);
+
+  // A password only ever reaches nsIURI through a userinfo component, and every
+  // nsIURI implementation that can report a non-empty password parses that
+  // component out of a literal '@' in the spec. Parsing a URI is far more
+  // expensive than scanning for that byte, so reject the common case first.
+  if (!aSpec.Contains('@')) {
+    return;
+  }
+
+  nsCOMPtr<nsIURI> uri;
+  nsAutoCString password;
+  if (NS_FAILED(NS_NewURI(getter_AddRefs(uri), aSpec)) ||
+      NS_FAILED(uri->GetPassword(password)) || password.IsEmpty()) {
+    return;
+  }
+
+  // The spec is known to carry a password, so never fall back to it.
+  if (NS_FAILED(NS_GetSanitizedURIStringFromURI(uri, aSanitizedSpec))) {
+    aSanitizedSpec.Truncate();
+  }
+}
+
 nsresult NS_LoadPersistentPropertiesFromURISpec(
     nsIPersistentProperties** outResult, const nsACString& aSpec) {
   nsCOMPtr<nsIURI> uri;
@@ -4152,7 +4177,8 @@ void CheckForBrokenChromeURL(nsILoadInfo* aLoadInfo, nsIURI* aURI) {
   }
   nsAutoCString scheme;
   aURI->GetScheme(scheme);
-  if (!scheme.EqualsLiteral("chrome") && !scheme.EqualsLiteral("resource")) {
+  if (!scheme.EqualsLiteral("chrome") && !scheme.EqualsLiteral("resource") &&
+      !scheme.EqualsLiteral("moz-src")) {
     return;
   }
   nsAutoCString host;
@@ -4208,6 +4234,12 @@ void CheckForBrokenChromeURL(nsILoadInfo* aLoadInfo, nsIURI* aURI) {
       StringBeginsWith(spec, "resource://android/assets/web_extensions/"_ns)) {
     return;
   }
+
+  // browser/ is not built for GeckoView, so toolkit code that references it
+  // can never resolve these here.
+  if (StringBeginsWith(spec, "moz-src:///browser/"_ns)) {
+    return;
+  }
 #endif
 
   // DTD files from gre may not exist when requested by tests.
@@ -4219,13 +4251,6 @@ void CheckForBrokenChromeURL(nsILoadInfo* aLoadInfo, nsIURI* aURI) {
   // command line, which is then looked up in both app-specific and toolkit-wide
   // locations.
   if (spec.Find("backgroundtasks") != kNotFound) {
-    return;
-  }
-
-  // SessionStoreFunctions.sys.mjs may be missing at runtime in xpcshell tests:
-  // https://bugzilla.mozilla.org/show_bug.cgi?id=2018078#c3
-  if (spec.EqualsLiteral(
-          "resource:///modules/sessionstore/SessionStoreFunctions.sys.mjs")) {
     return;
   }
 

@@ -411,7 +411,7 @@ impl FontFamily {
             })
         );
 
-        &*MOZ_BULLET
+        &MOZ_BULLET
     }
 
     /// Returns a font family for a single system font.
@@ -706,10 +706,7 @@ impl GenericFontFamily {
 
 impl Parse for SingleFontFamily {
     /// Parse a font-family value.
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         if let Ok(value) = input.try_parse(|i| i.expect_string_cloned()) {
             return Ok(SingleFontFamily::FamilyName(FamilyName {
                 name: Atom::from(&*value),
@@ -743,7 +740,7 @@ impl Parse for SingleFontFamily {
             let ident = input.expect_ident()?;
             serialize_quoted = serialize_quoted || ident.contains(' ');
             value.push(' ');
-            value.push_str(&ident);
+            value.push_str(ident);
         }
         while let Ok(ident) = input.try_parse(|i| i.expect_ident_cloned()) {
             serialize_quoted = serialize_quoted || ident.contains(' ');
@@ -803,7 +800,7 @@ impl FontFamilyList {
         let mut target_index = None;
 
         for (i, f) in self.iter().enumerate() {
-            match &*f {
+            match f {
                 SingleFontFamily::Generic(f) => {
                     if index_of_first_generic.is_none() && f.valid_for_user_font_prioritization() {
                         // If we haven't found a target position, there's nothing to do;
@@ -848,7 +845,7 @@ impl FontFamilyList {
     /// Returns whether we need to prioritize user fonts.
     #[cfg_attr(feature = "servo", allow(unused))]
     pub(crate) fn needs_user_font_prioritization(&self) -> bool {
-        self.iter().next().map_or(true, |f| match f {
+        self.iter().next().is_none_or(|f| match f {
             SingleFontFamily::Generic(f) => !f.valid_for_user_font_prioritization(),
             _ => true,
         })
@@ -1134,7 +1131,6 @@ impl ToComputedValue for specified::MathDepth {
 
     fn to_computed_value(&self, cx: &Context) -> i8 {
         use crate::properties::longhands::math_style::SpecifiedValue as MathStyleValue;
-        use std::{cmp, i8};
 
         let int = match self {
             specified::MathDepth::AutoAdd => {
@@ -1152,7 +1148,7 @@ impl ToComputedValue for specified::MathDepth {
             },
             specified::MathDepth::Absolute(abs) => abs.to_computed_value(cx),
         };
-        cmp::min(int, i8::MAX as i32) as i8
+        std::cmp::min(int, i8::MAX as i32) as i8
     }
 
     fn from_computed_value(other: &i8) -> Self {
@@ -1171,8 +1167,7 @@ impl ToAnimatedValue for MathDepth {
 
     #[inline]
     fn from_animated_value(animated: Self::AnimatedValue) -> Self {
-        use std::{cmp, i8};
-        cmp::min(animated, i8::MAX as i32) as i8
+        std::cmp::min(animated, i8::MAX as i32) as i8
     }
 }
 

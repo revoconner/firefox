@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
 
 const LoginInfo = new Components.Constructor(
@@ -35,6 +36,22 @@ ChromeUtils.defineESModuleGetters(lazy, {
   WebAuthnFeature: "resource://gre/modules/WebAuthnFeature.sys.mjs",
   PasswordGenerator: "resource://gre/modules/shared/PasswordGenerator.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
+});
+
+ChromeUtils.defineLazyGetter(lazy, "SmartFormFillAutocomplete", () => {
+  if (AppConstants.MOZ_BUILD_APP != "browser") {
+    return undefined;
+  }
+
+  try {
+    return ChromeUtils.importESModule(
+      // eslint-disable-next-line mozilla/no-browser-refs-in-toolkit
+      "moz-src:///browser/components/aiwindow/ui/modules/SmartFormFillAutocomplete.sys.mjs"
+    ).SmartFormFillAutocomplete;
+  } catch (error) {
+    console.error(`Unable to load SmartFormFillAutocomplete.sys.mjs: ${error}`);
+  }
+  return undefined;
 });
 
 XPCOMUtils.defineLazyServiceGetter(
@@ -410,7 +427,9 @@ export class LoginManagerParent extends JSWindowActorParent {
     lazy.log("#onPasswordEditedOrGenerated: Received PasswordManager.");
     if (gListenerForTests) {
       lazy.log("#onPasswordEditedOrGenerated: Calling gListenerForTests.");
-      gListenerForTests("PasswordEditedOrGenerated", {});
+      gListenerForTests("PasswordEditedOrGenerated", {
+        browsingContext: this.browsingContext,
+      });
     }
     let browser = this.getRootBrowser();
     this._onPasswordEditedOrGenerated(browser, this.origin, data);
@@ -420,16 +439,21 @@ export class LoginManagerParent extends JSWindowActorParent {
     lazy.log("#onIgnorePasswordEdit: Received PasswordManager.");
     if (gListenerForTests) {
       lazy.log("#onIgnorePasswordEdit: Calling gListenerForTests.");
-      gListenerForTests("PasswordIgnoreEdit", {});
+      gListenerForTests("PasswordIgnoreEdit", {
+        browsingContext: this.browsingContext,
+      });
     }
   }
 
   #onShowDoorhanger(data) {
     const browser = this.getRootBrowser();
+    // Read before awaiting: the actor may be destroyed by the time the doorhanger resolves.
+    const browsingContext = this.browsingContext;
     const submitPromise = this.showDoorhanger(browser, this.origin, data);
     if (gListenerForTests) {
       submitPromise.then(() => {
         gListenerForTests("ShowDoorhanger", {
+          browsingContext,
           origin: this.origin,
           data,
         });
@@ -717,6 +741,7 @@ export class LoginManagerParent extends JSWindowActorParent {
       previousResult,
       forcePasswordGeneration,
       hasBeenTypePassword,
+      inputType,
       isProbablyANewPasswordField,
       scenarioName,
       inputMaxLength,
@@ -829,6 +854,18 @@ export class LoginManagerParent extends JSWindowActorParent {
         }))
       );
     }
+
+    const browsingContext = this.getBrowsingContextToUse();
+    if (lazy.SmartFormFillAutocomplete && browsingContext) {
+      autocompleteItems.push(
+        ...(await (lazy.SmartFormFillAutocomplete.autocompleteItemsAsync({
+          browsingContext,
+          searchString,
+          inputType,
+        }) ?? []))
+      );
+    }
+
     // This check is only used to init webauthn in tests, which causes
     // intermittent like Bug 1890419.
     if (LoginManagerParent._webAuthnAutoComplete) {

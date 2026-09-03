@@ -41,6 +41,7 @@ UNIFIED_SOURCES += [
     "TestAudioSampleFormat.cpp",
     "TestAudioSegment.cpp",
     "TestAudioSinkWrapper.cpp",
+    "TestAudioStream.cpp",
     "TestAudioTrackEncoder.cpp",
     "TestAudioTrackGraph.cpp",
     "TestBitWriter.cpp",
@@ -95,6 +96,7 @@ UNIFIED_SOURCES += [
     "TestWebMBuffered.cpp",
     "TestWebMDemuxer.cpp",
     "TestWebMWriter.cpp",
+    "TestYUVBufferGenerator.cpp",
     "YUVBufferGenerator.cpp",
 ]
 
@@ -116,6 +118,7 @@ if CONFIG["OS_TARGET"] != "Android":
     UNIFIED_SOURCES += [
         "TestCDMStorage.cpp",
         "TestGMPCrossOrigin.cpp",
+        "TestGMPPluginScan.cpp",
         "TestGMPRemoveAndDelete.cpp",
     ]
 
@@ -139,6 +142,8 @@ if CONFIG["MOZ_WEBRTC"] and CONFIG["OS_TARGET"] != "Android":
     ]
 
 TEST_HARNESS_FILES.gtest += [
+    "../mediasource/test/bug1341228_init.webm",
+    "../mediasource/test/bug2065262_init.webm",
     "../test/adts.aac",
     "../test/av1.mp4",
     "../test/gizmo-frag.mp4",

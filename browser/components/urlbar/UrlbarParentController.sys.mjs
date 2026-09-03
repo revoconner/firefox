@@ -8,10 +8,12 @@ import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
  * @import {BrowserSearchTelemetry} from "moz-src:///browser/components/search/BrowserSearchTelemetry.sys.mjs"
  * @import {ProvidersManager} from "moz-src:///browser/components/urlbar/UrlbarProvidersManager.sys.mjs"
  * @import {SearchEngine} from "moz-src:///toolkit/components/search/SearchEngine.sys.mjs"
- * @import {SapLocation, SmartbarInput} from "moz-src:///browser/components/urlbar/content/SmartbarInput.mjs"
+ * @import {SapLocation} from "moz-src:///browser/components/urlbar/content/SmartbarInput.mjs"
  * @import {UrlbarView} from "chrome://browser/content/urlbar/UrlbarView.mjs"
- * @import {WindowMode} from "moz-src:///browser/components/urlbar/content/UrlbarInput.mjs"
+ * @import {WindowMode} from "moz-src:///browser/components/urlbar/content/UrlbarInputBase.mjs"
  * @import {SearchEngineInfo} from "chrome://browser/content/urlbar/SearchEngineStore.mjs"
+ * @import {UrlbarLoadRequest} from "chrome://browser/content/urlbar/UrlbarShared.mjs"
+ * @import {UrlbarChildControllerProxy, UrlbarInputProxy, UrlbarViewProxy} from "moz-src:///browser/components/urlbar/actors/UrlbarParent.sys.mjs"
  */
 
 const lazy = {};
@@ -101,12 +103,12 @@ export class UrlbarParentController {
   static _lastAutofillReintegrationPromise = Promise.resolve();
 
   /**
-   * The paired UrlbarChildController, which registers itself via setChild().
+   * The paired UrlbarChildController or an object that can forward calls to it.
    * Listener registration and notification dispatch live on it, keeping
    * dispatch on the side where the listeners (the view, the event bufferer)
    * live. The child is always set before any query runs.
    *
-   * @type {UrlbarChildController}
+   * @type {UrlbarChildControllerProxy | UrlbarChildController}
    */
   #child = null;
 
@@ -167,10 +169,9 @@ export class UrlbarParentController {
   }
 
   /**
-   * The input, owned by the paired `UrlbarChildController` and read through it
-   * for the query-lifecycle and telemetry call sites that need it.
+   * The input or an object that can forward calls to the input.
    *
-   * @type {UrlbarInput}
+   * @type {UrlbarInputProxy | UrlbarInput}
    */
   get input() {
     return this.#child?.input;
@@ -185,6 +186,17 @@ export class UrlbarParentController {
    */
   get browserWindow() {
     return this.#actor?.browsingContext?.topChromeWindow;
+  }
+
+  /**
+   * Whether the view showing these results renders in a content process, which
+   * decodes what it displays itself. For an in-page urlbar that is the
+   * privileged about process.
+   *
+   * @type {boolean}
+   */
+  get rendersInContentProcess() {
+    return !!this.#actor?.browsingContext?.isContent;
   }
 
   /**
@@ -209,40 +221,23 @@ export class UrlbarParentController {
   }
 
   /**
-   * The view.
+   * The view or an object that can forward calls to the view.
    *
-   * @type {UrlbarView}
+   * @type {UrlbarViewProxy | UrlbarView}
    */
   get view() {
     return this.#child?.view;
   }
 
   /**
-   * Returns the view update a dynamic result's provider produces for the
-   * given node ids. Mediates the view's access to the (parent-process)
-   * provider.
-   *
-   * @param {UrlbarResult} result The dynamic result.
-   * @param {object} idsByName A map from node names to element ids.
-   * @returns {Promise<object>} The view update.
-   */
-  getViewUpdate(result, idsByName) {
-    // On the message path this round-trips asynchronously, so the provider can
-    // be unregistered by the time it runs. In practice this only happens in
-    // tests, which unregister providers mid-run while a superseded query's row
-    // is still tearing down. The update is then moot; return nothing and let
-    // the view skip it.
-    return this.manager
-      .getProvider(result.providerName)
-      ?.getViewUpdate(result, idsByName);
-  }
-
-  /**
    * Notifies a result's provider that the result is about to be selected.
    * Mediates the view's access to the (parent-process) provider.
    *
-   * @param {UrlbarResult} result The result being selected.
-   * @param {Element} element The selected element.
+   * @param {UrlbarResult} result
+   *   The result being selected.
+   * @param {Element} [element]
+   *   The selected element. Undefined in the message path.
+   *   New providers should not use this parameter!
    */
   onBeforeSelection(result, element) {
     this.manager
@@ -255,12 +250,11 @@ export class UrlbarParentController {
    * view's access to the (parent-process) provider.
    *
    * @param {UrlbarResult} result The selected result.
-   * @param {Element} element The selected element.
    */
-  onSelection(result, element) {
+  onSelection(result) {
     this.manager
       .getProvider(result?.providerName)
-      ?.tryMethod("onSelection", result, element);
+      ?.tryMethod("onSelection", result);
   }
 
   /**
@@ -300,8 +294,9 @@ export class UrlbarParentController {
    *   The id of the browser committed at Enter; its per-tab data and navigation
    *   epoch are read here, defaulting to the selected browser.
    * @returns {Promise<object>}
-   *   `{ heuristicResult }` to pick, `{ fixup: { url, postData, keywordAsSent } }`
-   *   to load, or `{}` when the browser navigated in the meanwhile.
+   *   `{ heuristicResult }` to pick,
+   *   `{ fixup: { url, postData: ?string, keywordAsSent } }` to load, or `{}`
+   *   when the browser navigated in the meanwhile.
    */
   async resolveFallbackNavigation({
     searchString,
@@ -372,7 +367,16 @@ export class UrlbarParentController {
           Services.uriFixup.getFixupURIInfo(searchString, flags);
         return navigated()
           ? {}
-          : { fixup: { url: preferredURI.spec, postData, keywordAsSent } };
+          : {
+              fixup: {
+                url: preferredURI.spec,
+                // Post data only happens if the default engine is POST (rare)
+                postData: postData
+                  ? lazy.UrlbarUtils.getPostDataString(postData)
+                  : null,
+                keywordAsSent,
+              },
+            };
       } catch (fixupEx) {
         // uriFixup can throw; swallow it so the resolve never rejects.
         console.error(fixupEx);
@@ -440,7 +444,10 @@ export class UrlbarParentController {
    */
   recordEngagement(wire) {
     this.engagementEvent.recordFromChild(
-      lazy.UrlbarTelemetryUtils.recordedEngagementFromWire(wire)
+      lazy.UrlbarTelemetryUtils.recordedEngagementFromWire(
+        wire,
+        this.liveResults
+      )
     );
   }
 
@@ -780,7 +787,7 @@ export class UrlbarParentController {
    * and notification dispatch. It must be set before any query runs, since
    * the query lifecycle notifies through it.
    *
-   * @param {object} child The paired UrlbarChildController.
+   * @param {UrlbarChildControllerProxy | UrlbarChildController} child
    */
   setChild(child) {
     this.#child = child;
@@ -851,9 +858,20 @@ export class UrlbarParentController {
   }
 
   /**
-   * Returns the icon URL of the engine with the given id. This can be a blob
-   * URL, which only resolves in this process, so UrlbarParent serializes it
-   * before handing it to another process.
+   * Opens the preferences page. The chrome window's `openPreferences` is a
+   * script global of the browser window, out of reach of an input hosted in a
+   * content page, so the call is made here.
+   *
+   * @param {string} paneID
+   *   The preferences pane to open, per `openPreferences`.
+   */
+  openPreferences(paneID) {
+    this.browserWindow.openPreferences(paneID);
+  }
+
+  /**
+   * Returns the icon URL of the engine with the given id, in a form the view
+   * can load.
    *
    * @param {string} engineId
    * @returns {Promise<?string>}
@@ -865,7 +883,7 @@ export class UrlbarParentController {
       lazy.logger.warn(`No engine found for id ${engineId}`);
       return null;
     }
-    return (await engine.getIconURL()) ?? null;
+    return (await lazy.UrlbarUtils.getEngineIconUrl(engine, this)) ?? null;
   }
 
   /**
@@ -915,7 +933,7 @@ export class UrlbarParentController {
             // Speculative connect only if search suggestions are enabled.
             if (
               (lazy.UrlbarPrefs.get("suggest.searches") ||
-                context.sapName == "searchbar") &&
+                context.isSearchbarSAP) &&
               lazy.UrlbarPrefs.get("browser.search.suggest.enabled")
             ) {
               let engine = lazy.SearchService.getEngineByName(
@@ -966,8 +984,8 @@ export class UrlbarParentController {
    * revert the input.
    *
    * @param {object} loadData
-   * @param {string} loadData.url
-   *   The URL to load.
+   * @param {UrlbarLoadRequest} loadData.loadRequest
+   *   What to load.
    * @param {string} loadData.where
    *   Where to open, per `openTrustedLinkIn`.
    * @param {object} loadData.params
@@ -984,10 +1002,16 @@ export class UrlbarParentController {
    *   browser to hand `focusBrowser` on the deferred-Enter keyup -- a
    *   content-process input can't resolve the selected browser itself.
    */
-  loadURL({ url, where, params, browserId, userTypedValue }) {
+  loadURL({ loadRequest, where, params, browserId, userTypedValue }) {
     let browser =
       this.resolveTargetBrowser(browserId) ||
       this.browserWindow.gBrowser.selectedBrowser;
+
+    let { url, postData } = lazy.UrlbarUtils.loadRequestToUrl(loadRequest);
+    if (!url) {
+      return { reverted: true, browserId: browser.browserId };
+    }
+    params.postData = postData;
 
     if (this.#isAddressbar) {
       this.#prepareAddressbarLoad({
@@ -1246,7 +1270,9 @@ export class UrlbarParentController {
    * @param {UrlbarQueryContext} queryContext the object to cache.
    */
   setLastQueryContextCache(queryContext) {
-    this._lastQueryContextWrapper = { queryContext };
+    // Marked done: no query is running behind a context cached this way, so
+    // cancelQuery() must not treat it as one.
+    this._lastQueryContextWrapper = { queryContext, done: true };
   }
 
   /**
@@ -1257,6 +1283,16 @@ export class UrlbarParentController {
   }
 
   /**
+   * The last query's results, which are the authoritative objects a result
+   * reconstructed from the wire resolves back to. See `UrlbarResult.fromWire()`.
+   *
+   * @type {UrlbarResult[]}
+   */
+  get liveResults() {
+    return this._lastQueryContextWrapper?.queryContext.results ?? [];
+  }
+
+  /**
    * Notifies listeners of results, by dispatching through the paired
    * UrlbarChildController, which owns the listeners.
    *
@@ -1264,7 +1300,18 @@ export class UrlbarParentController {
    * @param {object} params Parameters to pass with the notification.
    */
   notify(name, ...params) {
-    this.#child.notify(name, ...params);
+    if (this.#child.isProxy === true) {
+      this.#child.notifyFromWire(
+        name,
+        ...params.map(param =>
+          param instanceof lazy.UrlbarQueryContext
+            ? { serializedQueryContext: param.toWire() }
+            : param
+        )
+      );
+    } else {
+      this.#child.notify(name, ...params);
+    }
   }
 
   #engineStoreInitStarted = false;
@@ -1496,12 +1543,18 @@ export class TelemetryEvent {
     }
 
     this._startEventInfo = {
-      timeStamp: event.timeStamp || ChromeUtils.now(),
+      timeStamp: event.timeStamp,
       interactionType:
         interactionType ||
         lazy.UrlbarTelemetryUtils.startInteractionType(event, searchString),
       searchString,
     };
+
+    // Engagements that run no query would otherwise reach the provider
+    // notifications with no context at all.
+    if (!this._controller._lastQueryContextWrapper) {
+      this._controller.setLastQueryContextCache(queryContext);
+    }
   }
 
   /**
@@ -1593,7 +1646,6 @@ export class TelemetryEvent {
       // `#internalRecord()`.)
       if (!details.isSessionOngoing) {
         this._startEventInfo = null;
-        this._discarded = false;
       }
     }
   }
@@ -1665,7 +1717,7 @@ export class TelemetryEvent {
    *
    * @param {string} searchSource
    *   The search source string to convert.
-   * @returns {null|"urlbar"|"searchbar"|"smartbar"|"handoff"|"urlbar_newtab"|"urlbar_addonpage"}
+   * @returns {null|"urlbar"|"newtab_searchbar"|"searchbar"|"smartbar"|"handoff"|"urlbar_newtab"|"urlbar_addonpage"}
    *   The sap value for urlbar.* telemetry or null if the browser window
    *   already started closing. In that case, no telemetry should be recorded.
    */
@@ -1676,6 +1728,9 @@ export class TelemetryEvent {
     // TODO (bug 2024630): Ideally, we would not add every new SAP here.
     if (searchSource === "searchbar") {
       return "searchbar";
+    }
+    if (searchSource === "newtab_searchbar") {
+      return "newtab_searchbar";
     }
     if (searchSource === "smartbar") {
       return "smartbar";
@@ -1741,7 +1796,8 @@ export class TelemetryEvent {
    * @param {string} data.searchSource
    *   The search source.
    * @param {object} data.internalDetails
-   *   The interaction details (picked result reconstructed; event/element null).
+   *   The interaction details; `event` and `element` are null on the message
+   *   path.
    * @param {?object[]} data.exposures
    *   The resolved exposure list, or null when the session stays open.
    * @param {?UrlbarResult[]} data.visibleResults
@@ -1759,6 +1815,11 @@ export class TelemetryEvent {
   }) {
     try {
       let { queryContext } = this._controller._lastQueryContextWrapper || {};
+      if (!queryContext) {
+        // start() caches one for every session, so this means a caller ended a
+        // session it never started.
+        console.error(`Recording a ${method} with no query context`);
+      }
       let sap = this.#searchSourceToSap(searchSource);
 
       if (built && sap) {
@@ -1773,27 +1834,6 @@ export class TelemetryEvent {
       // this engagement or abandonment (the candidate was built content-side).
       if (disableBuilt) {
         this.startTrackingDisableSuggest(disableBuilt, searchSource);
-      }
-
-      // On the message path internalDetails.result was reconstructed from
-      // structured clone, which strips data that doesn't survive it (e.g. a Rust
-      // suggestion's UniFFI class) and yields an object distinct from the
-      // parent's authoritative result. Resolve it back to the live result by id
-      // so provider engagement handling -- notably dismissal against the Rust
-      // store -- operates on the live object, and carry the view-assigned
-      // rowIndex the wire preserves so the selection ping's position is right
-      // (the live result never went through a view). visibleResults stay as the
-      // wire results; the impression/abandonment hooks match them by id.
-      // TODO(bug 2055935): remove this or bake the resolution into the actor
-      // result deserialization.
-      let liveResult = queryContext?.results?.find(
-        r => r.id === internalDetails.result?.id
-      );
-      if (liveResult) {
-        if (internalDetails.result.rowIndex != null) {
-          liveResult.rowIndex = internalDetails.result.rowIndex;
-        }
-        internalDetails.result = liveResult;
       }
 
       this._controller.manager.notifyEngagementChange(
@@ -2206,7 +2246,6 @@ export class TelemetryEvent {
   discard() {
     if (this._startEventInfo) {
       this._startEventInfo = null;
-      this._discarded = true;
     }
   }
 

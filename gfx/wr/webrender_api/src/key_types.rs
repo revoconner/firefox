@@ -25,6 +25,14 @@ use std::hash::{Hash, Hasher};
 #[derive(Copy, PartialEq, Eq, Clone, PartialOrd, Ord, Hash, Deserialize, MallocSizeOf, Serialize, PeekPoke)]
 pub struct EdgeMask(u8);
 
+// `empty()` rather than `all()`, so a mask nobody set cannot silently
+// anti-alias an interior edge.
+impl Default for EdgeMask {
+    fn default() -> Self {
+        EdgeMask::empty()
+    }
+}
+
 bitflags! {
     impl EdgeMask: u8 {
         ///
@@ -366,6 +374,19 @@ impl<U> From<Size2D<f32, U>> for SizeKey {
     fn from(size: Size2D<f32, U>) -> SizeKey {
         SizeKey { w: size.width, h: size.height }
     }
+}
+
+/// The visible part of an image, as a fraction of the whole image on each axis,
+/// for use as a fragment of an interning key.
+///
+/// A fraction rather than image pixels because the size the image is finally
+/// rasterized at is not known until frame build, and resolving a pixel rect
+/// against the wrong size scales the primitive rather than just restricting
+/// sampling (bug 1452337, bug 2061491).
+#[derive(Copy, Debug, Clone, MallocSizeOf, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SubRectKey {
+    pub min: PointKey,
+    pub max: PointKey,
 }
 
 /// A hashable image stretch size for use as a fragment of an interning key. The

@@ -1351,9 +1351,9 @@ void nsWaylandDisplay::Init() {
   }
 }
 
-bool nsWaylandDisplay::IsTFSupported(int aTF) {
+bool nsWaylandDisplay::IsTFSupported(uint32_t aTF) {
   if (aTF < sColorTransfersNum) {
-    return mSupportedTransfer[aTF] == aTF;
+    return mSupportedTransfer[aTF] == (int)aTF;
   } else {
     NS_WARNING("Unknow color transfer function!");
     return false;
@@ -1362,6 +1362,23 @@ bool nsWaylandDisplay::IsTFSupported(int aTF) {
 
 bool nsWaylandDisplay::IsSetMDCVSupported() {
   return mColorManagerSupportedFeature.mDisplayPrimaries;
+}
+
+bool nsWaylandDisplay::IsSetLuminancesSupported() {
+  return mColorManagerSupportedFeature.mLuminances;
+}
+
+bool nsWaylandDisplay::IsPrimariesSupported(uint32_t aPrimaries) {
+  if (aPrimaries < sColorPrimariesNum) {
+    return mSupportedPrimaries[aPrimaries] == (int)aPrimaries;
+  } else {
+    NS_WARNING("Unknow color primaries!");
+    return false;
+  }
+}
+
+bool nsWaylandDisplay::IsParametricSupported() {
+  return mColorManagerSupportedFeature.mParametric;
 }
 
 }  // namespace mozilla::widget

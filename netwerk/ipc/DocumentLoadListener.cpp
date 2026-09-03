@@ -36,6 +36,7 @@
 #include "mozilla/dom/ProcessIsolation.h"
 #include "mozilla/dom/ReferrerInfo.h"
 #include "mozilla/dom/RemoteWebProgressRequest.h"
+#include "mozilla/dom/ServiceWorkerUtils.h"
 #include "mozilla/dom/SessionHistoryEntry.h"
 #include "mozilla/dom/WindowGlobalParent.h"
 #include "mozilla/dom/ipc/IdType.h"
@@ -61,6 +62,7 @@
 #include "nsIBrowserDOMWindow.h"
 #include "nsICachingChannel.h"
 #include "nsIClassifiedChannel.h"
+#include "nsIContentPolicy.h"
 #include "nsIHttpChannelInternal.h"
 #include "nsINetworkInterceptController.h"
 #include "nsISiteContainerService.h"
@@ -625,6 +627,9 @@ void DocumentLoadListener::TryActivateFromPrefetch(nsIURI* aURI) {
     mTiming->SetWasActivatedFromNavigationalPrefetch();
   }
 
+  nsCOMPtr<nsILoadInfo> loadInfo = mChannel->LoadInfo();
+  loadInfo->SetActivatedFromNavigationalPrefetch(true);
+
   LOG_SPECRULES(
       ("DocumentLoadListener::TryActivateFromPrefetch: [%p] activated from "
        "prefetch cache for rec=%p",
@@ -907,7 +912,7 @@ auto DocumentLoadListener::Open(nsDocShellLoadState* aLoadState,
   if (aLoadState->GetRemoteTypeOverride()) {
     if (!mIsDocumentLoad || !NS_IsAboutBlank(aLoadState->URI()) ||
         !loadingContext->IsTopContent() ||
-        aLoadState->GetEffectiveTriggeringRemoteType() != NOT_REMOTE_TYPE ||
+        !aLoadState->GetEffectiveTriggeringRemoteType().IsNotRemote() ||
         aLoadState->LoadIsFromSessionHistory()) {
       LOG(
           ("DocumentLoadListener::Open with invalid remoteTypeOverride "
@@ -1284,6 +1289,15 @@ auto DocumentLoadListener::OpenObject(
        aLoadState->URI()->GetSpecOrDefault().get()));
 
   MOZ_ASSERT(!mIsDocumentLoad);
+
+  // The content policy type is child-controlled; object loads must only
+  // ever claim to be object or embed loads, as the parent bases
+  // type-keyed security decisions (cookies, third-party status) on it.
+  if (aContentPolicyType != nsIContentPolicy::TYPE_INTERNAL_OBJECT &&
+      aContentPolicyType != nsIContentPolicy::TYPE_INTERNAL_EMBED) {
+    *aRv = NS_ERROR_UNEXPECTED;
+    return nullptr;
+  }
 
   auto sandboxFlags = aLoadState->TriggeringSandboxFlags();
 
@@ -2174,7 +2188,7 @@ bool DocumentLoadListener::MaybeTriggerProcessSwitch(
     return false;
   }
 
-  nsAutoCString currentRemoteType(NOT_REMOTE_TYPE);
+  RemoteType currentRemoteType = RemoteType::NotRemote();
   if (mContentParent) {
     currentRemoteType = mContentParent->GetRemoteType();
   }
@@ -2218,21 +2232,21 @@ bool DocumentLoadListener::MaybeTriggerProcessSwitch(
       gProcessIsolationLog, LogLevel::Verbose,
       ("CheckIsolationForNavigation -> current:(%s) remoteType:(%s) replace:%d "
        "group:%" PRIx64 " bfcache:%d shentry:%p newTab:%d",
-       currentRemoteType.get(), options.mRemoteType.get(),
-       options.mReplaceBrowsingContext, options.mSpecificGroupId,
-       options.mTryUseBFCache, options.mActiveSessionHistoryEntry.get(),
-       switchToNewTab));
+       currentRemoteType.Stringify().get(),
+       options.mRemoteType.Stringify().get(), options.mReplaceBrowsingContext,
+       options.mSpecificGroupId, options.mTryUseBFCache,
+       options.mActiveSessionHistoryEntry.get(), switchToNewTab));
 
   // Check if a process switch is needed.
   if (currentRemoteType == options.mRemoteType &&
       !options.mReplaceBrowsingContext && !switchToNewTab) {
     MOZ_LOG(gProcessIsolationLog, LogLevel::Info,
             ("Process Switch Abort: type (%s) is compatible",
-             options.mRemoteType.get()));
+             options.mRemoteType.Stringify().get()));
     return false;
   }
 
-  if (NS_WARN_IF(parentWindow && options.mRemoteType.IsEmpty())) {
+  if (NS_WARN_IF(parentWindow && options.mRemoteType.IsNotRemote())) {
     MOZ_LOG(gProcessIsolationLog, LogLevel::Error,
             ("Process Switch Abort: non-remote target process for subframe"));
     return false;
@@ -2240,8 +2254,7 @@ bool DocumentLoadListener::MaybeTriggerProcessSwitch(
 
   // ParentProcessDocumentChannel applies the same check to loads which started
   // in the parent, so do it here for loads switching into the parent.
-  if (options.mRemoteType == NOT_REMOTE_TYPE &&
-      currentRemoteType != NOT_REMOTE_TYPE) {
+  if (options.mRemoteType.IsNotRemote() && !currentRemoteType.IsNotRemote()) {
     nsCOMPtr<nsIURI> uri;
     MOZ_ALWAYS_SUCCEEDS(NS_GetFinalChannelURI(mChannel, getter_AddRefs(uri)));
     if (NS_WARN_IF(!nsDocShell::CanLoadInParentProcess(uri))) {
@@ -2252,7 +2265,7 @@ bool DocumentLoadListener::MaybeTriggerProcessSwitch(
     }
   }
 
-  *aWillSwitchToRemote = !options.mRemoteType.IsEmpty();
+  *aWillSwitchToRemote = !options.mRemoteType.IsNotRemote();
 
   // If we've decided to re-target this load into a new tab or window (see
   // `GetWhereToOpen`), do so before performing a process switch. This will
@@ -2366,7 +2379,7 @@ void DocumentLoadListener::TriggerProcessSwitch(
 
     MOZ_LOG(gProcessIsolationLog, LogLevel::Info,
             ("Process Switch: Changing Remoteness from '%s' to '%s'",
-             currentRemoteType.get(), aOptions.mRemoteType.get()));
+             currentRemoteType.get(), aOptions.mRemoteType.Stringify().get()));
   }
 
   // Stash our stream filter requests to pass to TriggerRedirectToRealChannel,
@@ -2696,6 +2709,17 @@ void DocumentLoadListener::TriggerRedirectToRealChannel(
            this));
       RedirectToRealChannelFinished(rv);
       return;
+    }
+
+    // Update the enterprise ServiceWorder policy on the destination
+    // BrowsingContext before sending the navigation to the content process.
+    // Since IPC messages from the parent to a given content process are
+    // ordered, the content process will see the correct
+    // ServiceWorkersDisabledByPolicy value before it begins loading the
+    // document, preventing scripts from observing a stale value.
+    if (aDestinationBrowsingContext->IsTopContent()) {
+      (void)aDestinationBrowsingContext->SetServiceWorkersDisabledByPolicy(
+          dom::IsServiceWorkersDisabledByPolicy(docURI));
     }
   }
 
@@ -3331,7 +3355,7 @@ DocumentLoadListener::Delete() {
 }
 
 NS_IMETHODIMP
-DocumentLoadListener::GetRemoteType(nsACString& aRemoteType) {
+DocumentLoadListener::GetRemoteType(dom::RemoteType& aRemoteType) {
   // FIXME: The remote type here should be pulled from the remote process used
   // to create this DLL, not from the current `browsingContext`.
   RefPtr<CanonicalBrowsingContext> browsingContext =
@@ -3340,11 +3364,8 @@ DocumentLoadListener::GetRemoteType(nsACString& aRemoteType) {
     return NS_ERROR_UNEXPECTED;
   }
 
-  ErrorResult error;
-  browsingContext->GetCurrentRemoteType(aRemoteType, error);
-  if (error.Failed()) {
-    aRemoteType = NOT_REMOTE_TYPE;
-  }
+  dom::ContentParent* cp = browsingContext->GetContentParent();
+  aRemoteType = cp ? cp->GetRemoteType() : dom::RemoteType::NotRemote();
   return NS_OK;
 }
 

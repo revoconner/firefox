@@ -42,6 +42,7 @@ projects:
     - components:feature-addons
     - components:feature-app-links
     - components:feature-autofill
+    - components:feature-automotive
     - components:feature-awesomebar
     - components:feature-contextmenu
     - components:feature-customtabs
@@ -51,6 +52,7 @@ projects:
     - components:feature-importer
     - components:feature-intent
     - components:feature-ipprotection
+    - components:feature-listentopage
     - components:feature-logins
     - components:feature-media
     - components:feature-password-importer

@@ -1262,9 +1262,11 @@ nsresult nsPrintJob::ReflowPrintObject(const UniquePtr<nsPrintObject>& aPO) {
       !aPO->mParent || !aPO->mParent->PrintingIsEnabled();
   auto* embedderFrame = [&]() -> nsSubDocumentFrame* {
     if (documentIsTopLevel) {
-      if (nsCOMPtr<nsIDocumentViewer> viewer =
-              do_QueryInterface(mDocViewerPrint)) {
-        return viewer->FindContainerFrame();
+      if (mIsCreatingPrintPreview) {
+        if (nsCOMPtr<nsIDocumentViewer> viewer =
+                do_QueryInterface(mDocViewerPrint)) {
+          return viewer->FindContainerFrame();
+        }
       }
     } else if (aPO->mContent) {
       return do_QueryFrame(aPO->mContent->GetPrimaryFrame());
@@ -2018,7 +2020,7 @@ class nsPrintCompletionEvent : public Runnable {
     NS_ASSERTION(mDocViewerPrint, "mDocViewerPrint is null.");
   }
 
-  NS_IMETHOD Run() override {
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY NS_IMETHOD Run() override {
     if (mDocViewerPrint) {
       mDocViewerPrint->OnDonePrinting();
     }
@@ -2026,7 +2028,7 @@ class nsPrintCompletionEvent : public Runnable {
   }
 
  private:
-  nsCOMPtr<nsIDocumentViewerPrint> mDocViewerPrint;
+  MOZ_KNOWN_LIVE const nsCOMPtr<nsIDocumentViewerPrint> mDocViewerPrint;
 };
 
 //-----------------------------------------------------------

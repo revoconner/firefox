@@ -1,34 +1,19 @@
 {
   "background": {
     "color": {
-      "@base": {
-        "comment": "TODO Bug 1821203 - Gray use needs to be consolidated",
-        "value": {
-          "nativeTheme": "color-mix(in srgb, currentColor 13%, transparent)",
-          "default": "transparent",
-          "forcedColors": "ButtonFace"
-        }
-      },
-      "hover": {
-        "value": {
-          "nativeTheme": "color-mix(in srgb, currentColor 17%, transparent)",
-          "light": "{color.violet-desaturated.20}",
-          "dark": "{color.violet-desaturated.50}",
-          "forcedColors": "SelectedItemText"
-        }
-      },
-      "active": {
-        "value": {
-          "nativeTheme": "color-mix(in srgb, currentColor 30%, transparent)",
-          "light": "{color.violet-desaturated.30}",
-          "dark": "{color.violet-desaturated.40}",
-          "forcedColors": "SelectedItemText"
-        }
-      },
       "disabled": {
         "value": "{button.background.color.@base}"
       },
       "primary": {
+        "@base": {
+          "value": "{color.accent.primary.@base}"
+        },
+        "hover": {
+          "value": "{color.accent.primary.hover}"
+        },
+        "active": {
+          "value": "{color.accent.primary.active}"
+        },
         "disabled": {
           "value": {
             "light": "{color.violet-desaturated.50}",
@@ -118,6 +103,12 @@
             "default": "{button.background.color.ghost.@base}",
             "forcedColors": "{button.background.color.@base}"
           }
+        }
+      },
+      "selected": {
+        "value": {
+          "default": "{button.background.color.active}",
+          "forcedColors": "SelectedItem"
         }
       }
     }
@@ -231,6 +222,16 @@
     },
     "radius": {
       "value": "{border.radius.xlarge}"
+    },
+    "width": {
+      "split": {
+        "value": "0"
+      }
+    }
+  },
+  "gap": {
+    "split": {
+      "value": "0"
     }
   },
   "opacity": {
@@ -248,10 +249,12 @@
       }
     }
   },
-  "size": {
-    "icon": {
-      "small": {
-        "value": "{size.item.medium}"
+  "split": {
+    "separator": {
+      "background": {
+        "color": {
+          "value": "{button.border.color.@base}"
+        }
       }
     }
   },
@@ -346,25 +349,11 @@
         }
       },
       "menu": {
-        "active": {
-          "value": {
-            "light": "{button.text.color.ghost.active}",
-            "dark": "{button.text.color.active}",
-            "forcedColors": "{button.text.color.primary.active}"
-          }
-        },
         "disabled": {
           "value": {
             "light": "{button.text.color.ghost.disabled}",
             "dark": "{button.text.color.disabled}",
-            "forcedColors": "{button.text.color.primary.disabled}"
-          }
-        },
-        "hover": {
-          "value": {
-            "light": "{button.text.color.ghost.hover}",
-            "dark": "{button.text.color.hover}",
-            "forcedColors": "{button.text.color.primary.@base}"
+            "forcedColors": "{button.text.color.disabled}"
           }
         },
         "selected": {

@@ -21,7 +21,6 @@
 #include "nsContentUtils.h"
 #include "nsGkAtoms.h"
 #include "nsIContentInlines.h"
-#include "nsIDragService.h"
 #include "nsIDragSession.h"
 #include "nsIPopupContainer.h"
 #include "nsIScriptContext.h"
@@ -57,6 +56,16 @@ nsXULTooltipListener::~nsXULTooltipListener() {
 NS_IMPL_ISUPPORTS(nsXULTooltipListener, nsIDOMEventListener)
 
 void nsXULTooltipListener::MouseOut(Event* aEvent) {
+  // This listener is a process-wide singleton, so mouseouts of nodes we are not
+  // tracking reach it too. They say nothing about the node the mouse is
+  // hovering, and acting on them cancels a tooltip about to show in another
+  // window.
+  nsCOMPtr<nsIContent> previousTarget =
+      do_QueryReferent(mPreviousMouseMoveTarget);
+  if (previousTarget != aEvent->GetOriginalTarget()) {
+    return;
+  }
+
   // reset flag so that tooltip will display on the next MouseMove
   mTooltipShownOnce = false;
   mPreviousMouseMoveTarget = nullptr;
@@ -248,16 +257,12 @@ nsXULTooltipListener::HandleEvent(Event* aEvent) {
 
   // Note that mousemove, mouseover and mouseout might be
   // fired even during dragging due to widget's bug.
-  nsCOMPtr<nsIDragService> dragService =
-      do_GetService("@mozilla.org/widget/dragservice;1");
-  NS_ENSURE_TRUE(dragService, NS_OK);
   auto* widgetGuiEvent = aEvent->WidgetEventPtr()->AsGUIEvent();
   if (!widgetGuiEvent) {
     return NS_OK;
   }
-  nsCOMPtr<nsIDragSession> dragSession =
-      dragService->GetCurrentSession(widgetGuiEvent->mWidget);
-  if (dragSession) {
+  if (nsCOMPtr<nsIDragSession> dragSession =
+          nsContentUtils::GetDragSession(widgetGuiEvent->mWidget)) {
     return NS_OK;
   }
 

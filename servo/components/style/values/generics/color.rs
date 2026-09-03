@@ -107,9 +107,9 @@ impl<Color: ToCss, Percentage: ToCss + ToPercentage> ToCss for ColorMix<Color, P
         // Per https://drafts.csswg.org/css-color-5/#serial-color-mix: omit every
         // percentage iff all are known (specified, non-calc) and equal to 100%/N.
         let omit_all = self.items.iter().all(|item| {
-            item.percentage.as_ref().map_or(false, |p| {
-                !p.is_calc() && p.to_percentage() == Some(uniform_value)
-            })
+            item.percentage
+                .as_ref()
+                .is_some_and(|p| !p.is_calc() && p.to_percentage() == Some(uniform_value))
         });
 
         for (index, item) in self.items.iter().enumerate() {
@@ -283,10 +283,10 @@ pub struct GenericLightDark<T> {
 
 impl<T> GenericLightDark<T> {
     /// Parse the arguments of the light-dark() function.
-    pub fn parse_args_with<'i>(
-        input: &mut Parser<'i, '_>,
-        mut parse_one: impl FnMut(&mut Parser<'i, '_>) -> Result<T, ParseError<'i>>,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse_args_with(
+        input: &mut Parser,
+        mut parse_one: impl FnMut(&mut Parser) -> Result<T, ParseError>,
+    ) -> Result<Self, ParseError> {
         let light = parse_one(input)?;
         input.expect_comma()?;
         let dark = parse_one(input)?;
@@ -294,10 +294,10 @@ impl<T> GenericLightDark<T> {
     }
 
     /// Parse the light-dark() function.
-    pub fn parse_with<'i>(
-        input: &mut Parser<'i, '_>,
-        parse_one: impl FnMut(&mut Parser<'i, '_>) -> Result<T, ParseError<'i>>,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse_with(
+        input: &mut Parser,
+        parse_one: impl FnMut(&mut Parser) -> Result<T, ParseError>,
+    ) -> Result<Self, ParseError> {
         input.expect_function_matching("light-dark")?;
         input.parse_nested_block(|input| Self::parse_args_with(input, parse_one))
     }

@@ -205,6 +205,11 @@
   num_temps: 1
   mir_op: true
 
+- name: NewBoundFunction
+  result_type: WordSized
+  num_temps: 1
+  mir_op: true
+
 - name: NewTypedArray
   result_type: WordSized
   call_instruction: true
@@ -3355,9 +3360,6 @@
 - name: WasmNullConstant
   result_type: WordSized
 
-- name: WasmCallIndirectAdjunctSafepoint
-  gen_boilerplate: false
-
 - name: WasmCall
   gen_boilerplate: false
 
@@ -3382,6 +3384,10 @@
   gen_boilerplate: false
 
 #ifdef ENABLE_WASM_JSPI
+- name: WasmSuspend
+  gen_boilerplate: false
+- name: WasmPrepareResume
+  gen_boilerplate: false
 - name: WasmResume
   gen_boilerplate: false
 #endif

@@ -102,7 +102,7 @@ add_task(async function test_startQuery_adds_results() {
   Assert.ok(added[0].payload.isBlockable, "Result should be blockable");
   Assert.equal(added[0].payload.frecency, 100, "Frecency is returned");
 
-  let controller = UrlbarTestUtils.newMockController();
+  let controller = UrlbarTestUtils.mockChildController();
   let stub = sinon.stub(controller, "removeResult");
   let promiseRemoved = PlacesTestUtils.waitForNotification("page-removed");
   await provider.onEngagement(queryContext, controller, {
@@ -287,7 +287,7 @@ add_task(async function test_switchTab() {
     );
     Assert.equal(result.payload.url, url, "Check result URL");
     Assert.equal(
-      result.payload.userContextId,
+      result.payload.userContext.id,
       userContextId,
       "Check user context"
     );

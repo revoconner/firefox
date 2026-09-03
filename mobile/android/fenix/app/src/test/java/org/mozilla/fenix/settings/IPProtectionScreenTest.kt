@@ -5,6 +5,7 @@
 package org.mozilla.fenix.settings
 
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.hasContentDescription
@@ -14,6 +15,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import mozilla.components.ExperimentalAndroidComponentsApi
+import mozilla.components.compose.base.theme.Theme
 import mozilla.components.concept.engine.ipprotection.ServiceState
 import mozilla.components.feature.ipprotection.store.state.Authorized
 import mozilla.components.feature.ipprotection.store.state.BYTES_PER_GB
@@ -25,26 +27,25 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mozilla.fenix.R
 import org.mozilla.fenix.theme.FirefoxTheme
-import org.mozilla.fenix.theme.Theme
 
 private const val PROMO_DATE = "September 30"
 
 @OptIn(ExperimentalAndroidComponentsApi::class)
 @RunWith(AndroidJUnit4::class)
 class IPProtectionScreenTest {
-    @get:Rule
-    val composeTestRule = createComposeRule()
+    @get:Rule val composeTestRule = createComposeRule()
 
     @Test
     fun `GIVEN the data limit is reached WHEN rendering the screen THEN the data limit UI is shown`() {
         val maxDataGb = 50f
-        val state = IPProtectionState(
-            eligibilityStatus = EligibilityStatus.Eligible,
-            proxyStatus = Authorized.DataLimitReached,
-            serviceStatus = ServiceState.Uninitialized,
-            maxDataBytes = maxDataGb.toLong() * BYTES_PER_GB.toLong(),
-            remainingDataBytes = 0L,
-        )
+        val state =
+            IPProtectionState(
+                eligibilityStatus = EligibilityStatus.Eligible,
+                proxyStatus = Authorized.DataLimitReached,
+                serviceStatus = ServiceState.Uninitialized,
+                maxDataBytes = maxDataGb.toLong() * BYTES_PER_GB.toLong(),
+                remainingDataBytes = 0L,
+            )
 
         composeTestRule.setContent {
             FirefoxTheme(theme = Theme.Light) {
@@ -65,41 +66,37 @@ class IPProtectionScreenTest {
             }
         }
 
-        composeTestRule.onNodeWithText(
-            testContext.getString(R.string.ip_protection_data_limit_label),
-        ).assertExists()
+        composeTestRule.onNodeWithText(testContext.getString(R.string.ip_protection_data_limit_label)).assertExists()
 
-        composeTestRule.onNodeWithText(
-            testContext.getString(
-                R.string.ip_protection_data_limit_reached_description,
-                maxDataGb.toInt(),
-            ),
-        ).assertExists()
+        composeTestRule
+            .onNodeWithText(
+                testContext.getString(
+                    R.string.ip_protection_data_limit_reached_description,
+                    maxDataGb.toInt(),
+                )
+            )
+            .assertExists()
 
-        composeTestRule.onNode(
-            hasText(testContext.getString(R.string.ip_protection_toggle_label)) and isToggleable(),
-        )
+        composeTestRule
+            .onNode(hasText(testContext.getString(R.string.ip_protection_toggle_label)) and isToggleable())
             .assertExists()
             .assertIsOff()
             .assertIsNotEnabled()
 
-        composeTestRule.onNodeWithText(
-            testContext.getString(R.string.ip_protection_location_section),
-        ).assertExists()
+        composeTestRule.onNodeWithText(testContext.getString(R.string.ip_protection_location_section)).assertExists()
 
-        composeTestRule.onNodeWithText(
-            testContext.getString(R.string.ip_protection_get_started),
-        ).assertDoesNotExist()
+        composeTestRule.onNodeWithText(testContext.getString(R.string.ip_protection_get_started)).assertDoesNotExist()
     }
 
     @Test
     fun `GIVEN an unlimited plan and a promo date WHEN rendering the screen THEN the promo description is shown`() {
-        val state = IPProtectionState(
-            eligibilityStatus = EligibilityStatus.Eligible,
-            proxyStatus = Authorized.Active,
-            maxDataBytes = 0L,
-            remainingDataBytes = 0L,
-        )
+        val state =
+            IPProtectionState(
+                eligibilityStatus = EligibilityStatus.Eligible,
+                proxyStatus = Authorized.Active,
+                maxDataBytes = 0L,
+                remainingDataBytes = 0L,
+            )
 
         composeTestRule.setContent {
             FirefoxTheme(theme = Theme.Light) {
@@ -120,23 +117,24 @@ class IPProtectionScreenTest {
             }
         }
 
-        composeTestRule.onNode(
-            hasContentDescription("unlimited bandwidth through $PROMO_DATE", substring = true),
-        ).assertExists()
-        composeTestRule.onNode(
-            hasContentDescription("Browse with extra protection", substring = true),
-        ).assertDoesNotExist()
+        composeTestRule
+            .onNode(hasContentDescription("unlimited bandwidth through $PROMO_DATE", substring = true))
+            .assertExists()
+        composeTestRule
+            .onNode(hasContentDescription("Browse with extra protection", substring = true))
+            .assertDoesNotExist()
     }
 
     // Practically, we shouldn't need to rely on this behaviour - but this fallback is valuable in case of user-error.
     @Test
     fun `GIVEN an unlimited plan and a null promo date WHEN rendering the screen THEN the fallback description is shown`() {
-        val state = IPProtectionState(
-            eligibilityStatus = EligibilityStatus.Eligible,
-            proxyStatus = Authorized.Active,
-            maxDataBytes = 0L,
-            remainingDataBytes = 0L,
-        )
+        val state =
+            IPProtectionState(
+                eligibilityStatus = EligibilityStatus.Eligible,
+                proxyStatus = Authorized.Active,
+                maxDataBytes = 0L,
+                remainingDataBytes = 0L,
+            )
 
         composeTestRule.setContent {
             FirefoxTheme(theme = Theme.Light) {
@@ -157,8 +155,46 @@ class IPProtectionScreenTest {
             }
         }
 
-        composeTestRule.onNode(
-            hasContentDescription("Browse with extra protection", substring = true),
-        ).assertExists()
+        composeTestRule.onNode(hasContentDescription("Browse with extra protection", substring = true)).assertExists()
+    }
+
+    @Test
+    fun `GIVEN the proxy is activating WHEN rendering the screen THEN the location row is not selectable`() {
+        val state =
+            IPProtectionState(
+                eligibilityStatus = EligibilityStatus.Eligible,
+                proxyStatus = Authorized.Activating,
+                serviceStatus = ServiceState.Ready,
+                maxDataBytes = 0L,
+                remainingDataBytes = 0L,
+            )
+
+        composeTestRule.setContent {
+            FirefoxTheme(theme = Theme.Light) {
+                IPProtectionScreen(
+                    state = state,
+                    snackbarHostState = SnackbarHostState(),
+                    readyToUse = true,
+                    syncingData = false,
+                    promoDate = null,
+                    onVpnToggle = {},
+                    onLearnMoreClick = {},
+                    onGetStartedClick = {},
+                    showDebugAction = false,
+                    onDebugActionClick = {},
+                    onNavigateBack = {},
+                    onLocationClicked = {},
+                    isLocationSelectionEnabled = true,
+                )
+            }
+        }
+
+        composeTestRule
+            .onNode(hasText(testContext.getString(R.string.ip_protection_toggle_label)) and isToggleable())
+            .assertIsNotEnabled()
+
+        composeTestRule
+            .onNodeWithText(testContext.getString(R.string.ip_protection_location_recommended_label))
+            .assertHasNoClickAction()
     }
 }

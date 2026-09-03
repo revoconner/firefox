@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/DebugOnly.h"
+#include "mozilla/glue/Debug.h"
 #include "mozilla/IntegerRange.h"
 #include "mozilla/MathAlgorithms.h"
 #include "mozilla/Maybe.h"
@@ -1893,10 +1894,10 @@ scan_value_range:
       JSObject* obj2 = &v.toObject();
 #ifdef DEBUG
       if (!obj2) {
-        fprintf(stderr,
-                "processMarkStackTop found ObjectValue(nullptr) "
-                "at %zu Values from end of range in object:\n",
-                size_t(end - (index - 1)));
+        printf_stderr(
+            "processMarkStackTop found ObjectValue(nullptr) "
+            "at %zu Values from end of range in object:\n",
+            size_t(end - (index - 1)));
         obj->dump();
       }
 #endif
@@ -3136,6 +3137,20 @@ bool js::gc::IsMarkedInternal(JSRuntime* rt, T* thing) {
 }
 
 template <typename T>
+static void MaybeMarkWeaklyHeldAtom(T* thing) {
+  // Propagate the mark state for atoms referenced by uncollected zones, which
+  // otherwise happens later.
+  if constexpr (std::is_same_v<T, JS::Symbol>) {
+    thing->runtimeFromAnyThread()->gc.maybeMarkWeaklyHeldAtom(thing);
+  } else if constexpr (std::is_same_v<T, JSString>) {
+    if (thing->isAtom()) {
+      thing->runtimeFromAnyThread()->gc.maybeMarkWeaklyHeldAtom(
+          &thing->asAtom());
+    }
+  }
+}
+
+template <typename T>
 bool js::gc::IsAboutToBeFinalizedInternal(T* thing) {
   // Don't depend on the mark state of other cells during finalization.
   MOZ_ASSERT(!CurrentThreadIsGCFinalizing());
@@ -3160,7 +3175,13 @@ bool js::gc::IsAboutToBeFinalizedInternal(T* thing) {
   }
 #endif
 
-  return zone->isGCSweeping() && !TenuredThingIsMarkedAny(thing);
+  if (!zone->isGCSweeping()) {
+    return false;
+  }
+
+  MaybeMarkWeaklyHeldAtom(thing);
+
+  return !TenuredThingIsMarkedAny(thing);
 }
 
 template <typename T>
@@ -3188,11 +3209,10 @@ inline bool SweepingTracer::onEdge(T** thingp, const char* name) {
     return true;
   }
 
+  // Permanent things are never finalized by non-owning runtimes.
   TenuredCell* cell = &thing->asTenured();
   Zone* zone = cell->zoneFromAnyThread();
-
 #ifdef DEBUG
-  // Permanent things are never finalized by non-owning runtimes.
   if (IsOwnedByOtherRuntime(runtime(), thing)) {
     MOZ_ASSERT(!zone->wasGCStarted());
     MOZ_ASSERT(thing->isMarkedBlack());
@@ -3202,9 +3222,10 @@ inline bool SweepingTracer::onEdge(T** thingp, const char* name) {
   // marking them before we try and sweep them. If this fails then we missed
   // adding a sweep group edge somewhere. This check can be disabled in places
   // where we only care about references from the current zone.
-  if (cell->getTraceKind() == JS::TraceKind::Symbol && !cell->isMarkedBlack() &&
-      !allowSweepingSymbolsEarly) {
-    MOZ_ASSERT(!zone->isGCMarking());
+  if constexpr (std::is_same_v<T, JS::Symbol>) {
+    if (!thing->isMarkedBlack() && !allowSweepingSymbolsEarly) {
+      MOZ_ASSERT(!zone->isGCMarking());
+    }
   }
 #endif
 
@@ -3215,7 +3236,13 @@ inline bool SweepingTracer::onEdge(T** thingp, const char* name) {
   //  - the mark queue
   bool sweepZone =
       zone->isGCSweeping() || (zone->isAtomsZone() && zone->isGCMarking());
-  return !(sweepZone && !cell->isMarkedAny());
+  if (!sweepZone) {
+    return true;
+  }
+
+  MaybeMarkWeaklyHeldAtom(thing);
+
+  return TenuredThingIsMarkedAny(thing);
 }
 
 namespace js::gc {

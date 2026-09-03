@@ -256,6 +256,36 @@ export class UrlbarQueryContext {
   sapName;
 
   /**
+   * Whether the query runs in a bar dedicated to search.
+   *
+   * @see {UrlbarShared.isSearchbarSAP}
+   * @type {boolean}
+   */
+  get isSearchbarSAP() {
+    return UrlbarShared.isSearchbarSAP(this.sapName);
+  }
+
+  /**
+   * Whether a string that isn't a URL may be searched for.
+   *
+   * @see {UrlbarShared.keywordEnabled}
+   * @type {boolean}
+   */
+  get keywordEnabled() {
+    return UrlbarShared.keywordEnabled(this.sapName);
+  }
+
+  /**
+   * Whether a string that is a URL may be navigated to.
+   *
+   * @see {UrlbarShared.navigationEnabled}
+   * @type {boolean}
+   */
+  get navigationEnabled() {
+    return UrlbarShared.navigationEnabled(this.sapName);
+  }
+
+  /**
    * @type {UrlbarSearchModeData}
    *   Details about the search mode associated with this context.
    */
@@ -446,7 +476,7 @@ export class UrlbarQueryContext {
    */
   static fromWire(wire) {
     Object.setPrototypeOf(wire, UrlbarQueryContext.prototype);
-    wire.results = wire.results?.map(UrlbarResult.fromWire) ?? [];
+    wire.results = wire.results?.map(r => UrlbarResult.fromWire(r)) ?? [];
     if (wire.heuristicResult) {
       wire.heuristicResult = UrlbarResult.fromWire(wire.heuristicResult);
     }

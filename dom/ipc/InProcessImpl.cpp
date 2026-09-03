@@ -136,7 +136,7 @@ InProcessParent::GetOsPid(int32_t* aOsPid) {
 }
 
 NS_IMETHODIMP InProcessParent::GetRemoteType(nsACString& aRemoteType) {
-  aRemoteType = NOT_REMOTE_TYPE;
+  aRemoteType = dom::RemoteType::NotRemote().Stringify();
   return NS_OK;
 }
 
@@ -194,6 +194,12 @@ JSActorManager* InProcessParent::AsJSActorManager() { return this; }
 
 NS_IMETHODIMP
 InProcessParent::AboutToLoadOrigin(nsIPrincipal* aPrincipal) { return NS_OK; }
+
+NS_IMETHODIMP InProcessParent::ValidatePrincipalXPCOM(nsIPrincipal* aPrincipal,
+                                                      bool* aRetVal) {
+  *aRetVal = true;
+  return NS_OK;
+}
 
 ////////////////////////
 // nsIDOMProcessChild //

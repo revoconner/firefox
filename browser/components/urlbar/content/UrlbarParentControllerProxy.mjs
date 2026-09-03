@@ -6,7 +6,7 @@ import { UrlbarQueryContext } from "chrome://browser/content/urlbar/UrlbarQueryC
 import { UrlbarResult } from "chrome://browser/content/urlbar/UrlbarResult.mjs";
 
 /**
- * @import {UrlbarChild} from "../../../actors/UrlbarChild.sys.mjs"
+ * @import {UrlbarChild} from "moz-src:///browser/components/urlbar/actors/UrlbarChild.sys.mjs"
  * @import {UrlbarParentController} from "moz-src:///browser/components/urlbar/UrlbarParentController.sys.mjs"
  */
 
@@ -17,9 +17,7 @@ import { UrlbarResult } from "chrome://browser/content/urlbar/UrlbarResult.mjs";
  * `browser.urlbar.ipc.chromeMessagePassing`) holds one of these instead of a
  * direct controller reference: it forwards the child->parent query-lifecycle
  * calls to the parent process as actor messages, where `UrlbarParent` routes
- * them to the real controller keyed by `instanceId`. Parent->child
- * notifications come back as `Notify` messages that the child actor dispatches
- * to the paired `UrlbarChildController`.
+ * them to the real controller keyed by `instanceId`.
  */
 export class UrlbarParentControllerProxy {
   /** @type {UrlbarChild} */
@@ -53,11 +51,11 @@ export class UrlbarParentControllerProxy {
 
   /**
    * Registers the paired child controller with the actor so parent->child
-   * `Notify` messages for this instance can be dispatched to it. The parent
+   * notifications for this instance can be dispatched to it. The parent
    * controller itself never holds the child on this path (cross-process it
    * can't, and a strong ref would pin the input and defeat cleanup).
    *
-   * @param {object} child
+   * @param {UrlbarChildController} child
    *   The paired `UrlbarChildController`.
    */
   setChild(child) {
@@ -417,7 +415,7 @@ export class UrlbarParentControllerProxy {
    * @param {UrlbarQueryContext} queryContext The context to cache.
    */
   setLastQueryContextCache(queryContext) {
-    this.#lastQueryContextWrapper = { queryContext };
+    this.#lastQueryContextWrapper = { queryContext, done: true };
     this.#actor.sendAsyncMessage("SetLastQueryContextCache", {
       instanceId: this.#instanceId,
       queryContext: queryContext.toWire(),
@@ -448,23 +446,6 @@ export class UrlbarParentControllerProxy {
     this.#actor.sendAsyncMessage("OnSelection", {
       instanceId: this.#instanceId,
       result: result.toWire(),
-    });
-  }
-
-  /**
-   * Returns a dynamic result's view update. This one is already async on the
-   * caller's side, so it round-trips through the parent rather than being
-   * pre-fetched.
-   *
-   * @param {UrlbarResult} result The dynamic result.
-   * @param {object} idsByName A map from node names to element ids.
-   * @returns {Promise<object>} The view update.
-   */
-  getViewUpdate(result, idsByName) {
-    return this.#actor.sendQuery("GetViewUpdate", {
-      instanceId: this.#instanceId,
-      result: result.toWire(),
-      idsByName,
     });
   }
 
@@ -515,6 +496,14 @@ export class UrlbarParentControllerProxy {
       where,
       inBackground,
       browserId,
+    });
+  }
+
+  /** @type {UrlbarParentController["openPreferences"]} */
+  openPreferences(paneID) {
+    this.#actor.sendAsyncMessage("OpenPreferences", {
+      instanceId: this.#instanceId,
+      paneID,
     });
   }
 }

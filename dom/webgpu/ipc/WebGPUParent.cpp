@@ -10,6 +10,7 @@
 #include "mozilla/ScopeExit.h"
 #include "mozilla/dom/WebGPUBinding.h"
 #include "mozilla/gfx/FileHandleWrapper.h"
+#include "mozilla/gfx/Logging.h"
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/layers/CompositorThread.h"
 #include "mozilla/layers/ImageDataSerializer.h"
@@ -148,21 +149,23 @@ extern "C" bool wgpu_server_get_linux_dmabuf_modifiers(
 #endif
 
 #if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
-extern const WGPUVkImageHandle* wgpu_server_get_vk_image_handle(
+extern ffi::WGPUDMABufInfo wgpu_server_get_dma_buf_info(
     WGPUWebGPUParentPtr aParent, WGPUTextureId aId) {
+  ffi::WGPUDMABufInfo info = {};
+
   auto* parent = static_cast<WebGPUParent*>(aParent);
 
   auto texture = parent->GetSharedTexture(aId);
   if (!texture) {
     MOZ_ASSERT_UNREACHABLE("unexpected to be called");
-    return nullptr;
+    return info;
   }
 
   auto* textureDMABuf = texture->AsSharedTextureDMABuf();
   if (!textureDMABuf) {
-    return nullptr;
+    return info;
   }
-  return textureDMABuf->GetHandle();
+  return textureDMABuf->GetDMABufInfo();
 }
 #endif
 
@@ -286,7 +289,7 @@ extern void wgpu_parent_queue_submit(
 
 extern void wgpu_parent_create_swap_chain(
     WGPUWebGPUParentPtr aParent, WGPUDeviceId aDeviceId, WGPUQueueId aQueueId,
-    int32_t aWidth, int32_t aHeight, WGPUSurfaceFormat aFormat,
+    uint32_t aWidth, uint32_t aHeight, WGPUSurfaceFormat aFormat,
     const WGPUBufferId* aBufferIds, uintptr_t aBufferIdsLength,
     WGPURemoteTextureOwnerId aRemoteTextureOwnerId,
     bool aUseSharedTextureInSwapChain) {
@@ -533,9 +536,6 @@ void WebGPUParent::MaintainDevices() {
 void WebGPUParent::LoseDevice(const RawId aDeviceId,
                               dom::GPUDeviceLostReason aReason,
                               const nsACString& aMessage) {
-  if (mActiveDeviceIds.Contains(aDeviceId)) {
-    mActiveDeviceIds.Remove(aDeviceId);
-  }
   // Check to see if we've already sent a DeviceLost message to aDeviceId.
   if (mLostDeviceIds.Contains(aDeviceId)) {
     return;
@@ -666,15 +666,9 @@ void WebGPUParent::PostAdapterRequestDevice(RawId aDeviceId) {
     mDeviceFenceHandles.emplace(aDeviceId, std::move(fenceHandle));
   }
 #endif
-
-  MOZ_ASSERT(!mActiveDeviceIds.Contains(aDeviceId));
-  mActiveDeviceIds.Insert(aDeviceId);
 }
 
 void WebGPUParent::PreDeviceDrop(RawId aDeviceId) {
-  if (mActiveDeviceIds.Contains(aDeviceId)) {
-    mActiveDeviceIds.Remove(aDeviceId);
-  }
   mErrorScopeStackByDevice.erase(aDeviceId);
   mLostDeviceIds.Remove(aDeviceId);
 }
@@ -867,14 +861,6 @@ void WebGPUParent::QueueSubmit(RawId aQueueId, RawId aDeviceId,
                                Span<const RawId> aCommandBuffers,
                                Span<const RawId> aTextureIds,
                                Span<const RawId> aExternalTextureSourceIds) {
-  for (const auto& textureId : aTextureIds) {
-    auto it = mSharedTextures.find(textureId);
-    if (it != mSharedTextures.end()) {
-      auto& sharedTexture = it->second;
-      sharedTexture->onBeforeQueueSubmit(aQueueId);
-    }
-  }
-
   for (const auto& sourceId : aExternalTextureSourceIds) {
     auto it = mExternalTextureSources.find(sourceId);
     if (it != mExternalTextureSources.end()) {
@@ -887,10 +873,24 @@ void WebGPUParent::QueueSubmit(RawId aQueueId, RawId aDeviceId,
     }
   }
 
+  // Must come after the bail-out above: the semaphores created here are
+  // registered as pending signals on the queue, and only
+  // wgpu_server_queue_submit() disposes of them.
+  nsTArray<ffi::WGPUVkSemaphoreHandle> signalSemaphores;
+  for (const auto& textureId : aTextureIds) {
+    auto it = mSharedTextures.find(textureId);
+    if (it != mSharedTextures.end()) {
+      auto& sharedTexture = it->second;
+      sharedTexture->onBeforeQueueSubmit(mContext.get(), aDeviceId, aQueueId,
+                                         signalSemaphores);
+    }
+  }
+
   ErrorBuffer error;
   auto index = ffi::wgpu_server_queue_submit(
       mContext.get(), aDeviceId, aQueueId,
-      {aCommandBuffers.Elements(), aCommandBuffers.Length()}, error.ToFFI());
+      {aCommandBuffers.Elements(), aCommandBuffers.Length()},
+      {signalSemaphores.Elements(), signalSemaphores.Length()}, error.ToFFI());
   // Check if index is valid. 0 means error.
   if (index != 0) {
     for (const auto& textureId : aTextureIds) {
@@ -1223,7 +1223,9 @@ ipc::IPCResult WebGPUParent::GetFrontBufferSnapshot(
 
   const auto& lookup = mPresentationDataMap.find(aOwnerId);
   if (lookup == mPresentationDataMap.end()) {
-    MOZ_ASSERT_UNREACHABLE("unexpected to be called");
+    // This can happen if `GPUCanvasContext.configure()` was called with an
+    // invalid configuration.
+    NS_WARNING("WebGPU reading back an invalid canvas");
     return IPC_OK();
   }
 
@@ -1378,7 +1380,7 @@ ipc::IPCResult WebGPUParent::GetFrontBufferSnapshot(
     ErrorBuffer error;
     ffi::wgpu_server_queue_submit(mContext.get(), data->mDeviceId,
                                   data->mQueueId, {&aCommandBufferId, 1},
-                                  error.ToFFI());
+                                  {nullptr, 0}, error.ToFFI());
     ffi::wgpu_server_command_encoder_drop(mContext.get(), aCommandEncoderId);
     ffi::wgpu_server_command_buffer_drop(mContext.get(), aCommandBufferId);
     if (ForwardError(error)) {
@@ -1411,7 +1413,7 @@ void WebGPUParent::PostSharedTexture(
   const auto& lookup = mPresentationDataMap.find(aOwnerId);
   if (lookup == mPresentationDataMap.end() || !mRemoteTextureOwner ||
       !mRemoteTextureOwner->IsRegistered(aOwnerId)) {
-    NS_WARNING("WebGPU presenting on a destroyed swap chain!");
+    NS_WARNING("WebGPU presenting on an invalid or destroyed swap chain!");
     return;
   }
 
@@ -1454,7 +1456,7 @@ void WebGPUParent::SwapChainPresent(
   const auto& lookup = mPresentationDataMap.find(aOwnerId);
   if (lookup == mPresentationDataMap.end() || !mRemoteTextureOwner ||
       !mRemoteTextureOwner->IsRegistered(aOwnerId)) {
-    NS_WARNING("WebGPU presenting on a destroyed swap chain!");
+    NS_WARNING("WebGPU presenting on an invalid or destroyed swap chain!");
     return;
   }
 
@@ -1574,7 +1576,7 @@ void WebGPUParent::SwapChainPresent(
     ErrorBuffer error;
     ffi::wgpu_server_queue_submit(mContext.get(), data->mDeviceId,
                                   data->mQueueId, {&aCommandBufferId, 1},
-                                  error.ToFFI());
+                                  {nullptr, 0}, error.ToFFI());
     ffi::wgpu_server_command_encoder_drop(mContext.get(), aCommandEncoderId);
     ffi::wgpu_server_command_buffer_drop(mContext.get(), aCommandBufferId);
     if (ForwardError(error)) {
@@ -1614,9 +1616,8 @@ void WebGPUParent::SwapChainDrop(const layers::RemoteTextureOwnerId& aOwnerId,
                                  layers::RemoteTextureTxnType aTxnType,
                                  layers::RemoteTextureTxnId aTxnId) {
   const auto& lookup = mPresentationDataMap.find(aOwnerId);
-  MOZ_ASSERT(lookup != mPresentationDataMap.end());
   if (lookup == mPresentationDataMap.end()) {
-    NS_WARNING("WebGPU presenting on a destroyed swap chain!");
+    NS_WARNING("drop invalid or destroyed swap chain!");
     return;
   }
 
@@ -1663,7 +1664,6 @@ void WebGPUParent::ActorDestroy(ActorDestroyReason aWhy) {
     mRemoteTextureOwner->UnregisterAllTextureOwners();
     mRemoteTextureOwner = nullptr;
   }
-  mActiveDeviceIds.Clear();
   mContext = nullptr;
 }
 
@@ -1786,7 +1786,7 @@ bool WebGPUParent::UseSharedTextureForSwapChain(
   auto ownerId = layers::RemoteTextureOwnerId{aSwapChainId._0};
   const auto& lookup = mPresentationDataMap.find(ownerId);
   if (lookup == mPresentationDataMap.end()) {
-    MOZ_ASSERT_UNREACHABLE("unexpected to be called");
+    NS_WARNING("WebGPU presenting on an invalid or destroyed swap chain!");
     return false;
   }
 
@@ -1836,7 +1836,7 @@ bool WebGPUParent::EnsureSharedTextureForSwapChain(
   auto ownerId = layers::RemoteTextureOwnerId{aSwapChainId._0};
   const auto& lookup = mPresentationDataMap.find(ownerId);
   if (lookup == mPresentationDataMap.end()) {
-    MOZ_ASSERT_UNREACHABLE("unexpected to be called");
+    gfxWarningOnce() << "invalid swap chain";
     return false;
   }
 
@@ -1878,7 +1878,7 @@ void WebGPUParent::EnsureSharedTextureForReadBackPresent(
   auto ownerId = layers::RemoteTextureOwnerId{aSwapChainId._0};
   const auto& lookup = mPresentationDataMap.find(ownerId);
   if (lookup == mPresentationDataMap.end()) {
-    MOZ_ASSERT_UNREACHABLE("unexpected to be called");
+    gfxWarningOnce() << "invalid swap chain";
     return;
   }
 
@@ -1958,30 +1958,6 @@ Maybe<ffi::WGPUFfiLUID> WebGPUParent::GetCompositorDeviceLuid() {
 
   return Some(
       ffi::WGPUFfiLUID{desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart});
-}
-#endif
-
-#if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)
-VkImageHandle::~VkImageHandle() {
-  if (!mParent) {
-    return;
-  }
-  auto* context = mParent->GetContext();
-  if (context && mParent->IsDeviceActive(mDeviceId) && mVkImageHandle) {
-    wgpu_vkimage_destroy(context, mDeviceId, mVkImageHandle);
-  }
-  wgpu_vkimage_delete(mVkImageHandle);
-}
-
-VkSemaphoreHandle::~VkSemaphoreHandle() {
-  if (!mParent) {
-    return;
-  }
-  auto* context = mParent->GetContext();
-  if (context && mParent->IsDeviceActive(mDeviceId) && mVkSemaphoreHandle) {
-    wgpu_vksemaphore_destroy(context, mDeviceId, mVkSemaphoreHandle);
-  }
-  wgpu_vksemaphore_delete(mVkSemaphoreHandle);
 }
 #endif
 

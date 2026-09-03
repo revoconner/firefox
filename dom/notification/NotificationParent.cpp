@@ -77,7 +77,8 @@ class NotificationObserver final : public nsIAlertCallbacks {
     glean::web_notification::shown.Record(
         Some(glean::web_notification::ShownExtra{.siteCategory = mCategory}));
 
-    if (RunActor([](auto* actor) { actor->OnAlertShow(); })) {
+    if (RunActor([](auto* actor) { actor->OnAlertShow(); }) ||
+        mScope.IsEmpty()) {
       return NS_OK;
     }
 
@@ -97,11 +98,23 @@ class NotificationObserver final : public nsIAlertCallbacks {
             .action = Some(aAction ? "action-button"_ns : "body"_ns),
             .siteCategory = mCategory}));
 
-    if (RunActor([](auto* actor) { actor->FireClickEvent(); })) {
-      return NS_OK;
-    } else if (mScope.IsEmpty()) {
-      // No actor there, we need to open up a window ourselves
-      return OpenWindowFor(mPrincipal);
+    nsCOMPtr<nsIURI> navigate;
+    if (StaticPrefs::dom_webnotifications_navigate_enabled()) {
+      if (aAction) {
+        aAction->GetNavigate(getter_AddRefs(navigate));
+      } else {
+        navigate = mNotification.options().navigate();
+      }
+    }
+
+    // If navigation URL is set, we will navigate in RespondOnClick.
+    if (!navigate) {
+      if (RunActor([](auto* actor) { actor->FireClickEvent(); })) {
+        return NS_OK;
+      } else if (mScope.IsEmpty()) {
+        // No actor there, we need to open up a window ourselves
+        return OpenWindowFor(mPrincipal);
+      }
     }
 
     nsAutoString actionName;
@@ -122,7 +135,8 @@ class NotificationObserver final : public nsIAlertCallbacks {
       glean::web_notification::dismissed.Record(Some(
           glean::web_notification::DismissedExtra{.siteCategory = mCategory}));
     }
-    if (RunActor([](auto* actor) { actor->OnAlertFinished(true); })) {
+    if (RunActor([](auto* actor) { actor->OnAlertFinished(true); }) ||
+        mScope.IsEmpty()) {
       return NS_OK;
     }
     return OnAlertFinishedCommon();
@@ -133,7 +147,8 @@ class NotificationObserver final : public nsIAlertCallbacks {
       glean::web_notification::dismissed.Record(Some(
           glean::web_notification::DismissedExtra{.siteCategory = mCategory}));
     }
-    if (RunActor([](auto* actor) { actor->OnAlertFinished(false); })) {
+    if (RunActor([](auto* actor) { actor->OnAlertFinished(false); }) ||
+        mScope.IsEmpty()) {
       return NS_OK;
     }
     return OnAlertFinishedCommon();
@@ -414,7 +429,8 @@ nsresult NotificationParent::Show(Maybe<IPCImage>&& aIcon) {
     nsTArray<RefPtr<nsIAlertAction>> actions;
     MOZ_ASSERT(options.actions().Length() <= kMaxActions);
     for (const auto& action : options.actions()) {
-      actions.AppendElement(new AlertAction(action.name(), action.title()));
+      actions.AppendElement(
+          new AlertAction(action.name(), action.title(), action.navigate()));
     }
     alert->SetActions(actions);
   }

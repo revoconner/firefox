@@ -12,7 +12,6 @@ use crate::print_tree::{PrintableTree, PrintTree, PrintTreePrinter};
 use crate::scene::SceneProperties;
 use crate::spatial_node::{ReferenceFrameInfo, SpatialNode, SpatialNodeDescriptor, SpatialNodeType, StickyFrameInfo};
 use crate::spatial_node::{ScrollFrameKind, SceneSpatialNode, SpatialNodeInfo};
-use std::{ops, u32};
 use crate::util::{FastTransform, LayoutToWorldFastTransform, MatrixHelpers, ScaleOffset, scale_factors};
 use smallvec::SmallVec;
 use crate::util::TransformedRectKind;
@@ -95,7 +94,7 @@ const MIN_SCROLL_ROOT_SIZE: f32 = 128.0;
 
 impl SpatialNodeIndex {
     pub fn new(index: usize) -> Self {
-        debug_assert!(index < ::std::u32::MAX as usize);
+        debug_assert!(index < u32::MAX as usize);
         SpatialNodeIndex(index as u32)
     }
 }
@@ -118,7 +117,7 @@ impl Default for VisibleFace {
     }
 }
 
-impl ops::Not for VisibleFace {
+impl std::ops::Not for VisibleFace {
     type Output = Self;
     fn not(self) -> Self {
         match self {
@@ -569,6 +568,14 @@ impl<Src, Dst> CoordinateSpaceMapping<Src, Dst> {
             CoordinateSpaceMapping::Local => FastTransform::identity(),
             CoordinateSpaceMapping::ScaleOffset(scale_offset) => FastTransform::with_scale_offset(scale_offset),
             CoordinateSpaceMapping::Transform(transform) => FastTransform::with_transform(transform),
+        }
+    }
+
+    pub fn is_perspective(&self) -> bool {
+        match *self {
+            CoordinateSpaceMapping::Local |
+            CoordinateSpaceMapping::ScaleOffset(_) => false,
+            CoordinateSpaceMapping::Transform(ref transform) => transform.has_perspective_component(),
         }
     }
 

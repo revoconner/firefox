@@ -257,6 +257,23 @@ add_task(async function test_reloadRecordsTryAgainTelemetry() {
   });
 });
 
+// Same reasoning for the learn-more link. Without its telemetry attributes it
+// still renders and still navigates, so the only symptom is the event quietly
+// going missing on every page that shows the CTA (bug 2064931).
+add_task(async function test_learnMoreRecordsClickTelemetry() {
+  Services.fog.testResetFOG();
+  await withDnsNotFoundPage(true, async browser => {
+    const newTabPromise = BrowserTestUtils.waitForNewTab(gBrowser);
+    await waitForSettledNetErrorCard(browser, { clickQuery: "learnMoreLink" });
+    const learnMoreTab = await newTabPromise;
+    await Services.fog.testFlushAllChildren();
+
+    const events = Glean.securityUiNeterror.clickLearnMoreLink.testGetValue();
+    is(events?.length, 1, "Learn more records one click_learn_more_link event");
+    BrowserTestUtils.removeTab(learnMoreTab);
+  });
+});
+
 // net-error-card.mjs reads the CTA pref at module scope and is shared with
 // about:certerror, which has its own RemotePageAccessManager allowlist. If the
 // pref is missing there the read throws, aboutNetError.mjs fails to evaluate,
@@ -298,5 +315,61 @@ add_task(async function test_noCtaWhenDisabled() {
       is(card.searchCTAButton, null, "No Search button with the pref off");
       is(card.reloadButton, null, "No Reload button with the pref off");
     });
+  });
+});
+
+add_task(async function test_ctaButtonAccessKeys() {
+  await withDnsNotFoundPage(true, async browser => {
+    await waitForSettledNetErrorCard(browser);
+    await SpecialPowers.spawn(
+      browser,
+      [getAccessKeyModifiers()],
+      async mods => {
+        const card =
+          content.document.querySelector("net-error-card").wrappedJSObject;
+        const searchButton = card.searchCTAButton;
+        const reloadButton = card.reloadButton;
+
+        await ContentTaskUtils.waitForCondition(
+          () => searchButton.accessKey && reloadButton.accessKey,
+          "Waiting for accesskeys to be set by Fluent"
+        );
+
+        is(searchButton.accessKey, "c", "Search button has accesskey 'c'");
+        is(reloadButton.accessKey, "R", "Reload button has accesskey 'R'");
+        isnot(
+          searchButton.accessKey,
+          reloadButton.accessKey,
+          "The two CTA buttons take different access keys"
+        );
+
+        // Listen on the card's shadow root, above the button, so the capture
+        // phase reaches this before the template's own @click and the search
+        // never actually runs. The capture flag has to be the boolean form.
+        let clickedId = null;
+        const onClick = e => {
+          e.stopPropagation();
+          clickedId = e.target.id;
+        };
+        card.shadowRoot.addEventListener("click", onClick, true);
+
+        EventUtils.synthesizeKey("s", mods, content);
+        is(
+          clickedId,
+          null,
+          "Access key S no longer activates the Search button"
+        );
+
+        clickedId = null;
+        EventUtils.synthesizeKey("c", mods, content);
+        is(
+          clickedId,
+          "searchCTAButton",
+          "Access key c activated the Search button"
+        );
+
+        card.shadowRoot.removeEventListener("click", onClick, true);
+      }
+    );
   });
 });

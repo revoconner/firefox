@@ -58,8 +58,6 @@ const PREF_SHOW_SPONSORED_STORIES = "showSponsored";
 const PREF_SHOW_SPONSORED_TOPSITES = "showSponsoredTopSites";
 const BLANK_HOMEPAGE_URL = "chrome://browser/content/blanktab.html";
 const PREF_PRIVATE_PING_ENABLED = "telemetry.privatePing.enabled";
-const PREF_REDACT_NEWTAB_PING_ENABLED =
-  "telemetry.privatePing.redactNewtabPing.enabled";
 const PREF_MERINO_FEED_EXPERIMENT =
   "browser.newtabpage.activity-stream.discoverystream.merino-feed-experiment";
 const PREF_PRIVATE_PING_INFERRED_ENABLED =
@@ -74,6 +72,15 @@ const PREF_SECTIONS_PERSONALIZATION_ENABLED =
 const PREF_SOV_FRECENCY_EXPOSURE = "sov.frecency.exposure";
 
 const TOP_STORIES_SECTION_NAME = "top_stories_section";
+
+// Activity notifications that ignore synthesized pointer moves, unlike the
+// plain user-interaction-active topic. EventStateManager fires "active" when
+// interaction starts and at each user_interaction_interval while it continues,
+// then "inactive" at the first interval with no input. The notification at the
+// start of a run only fires after a full idle period, so interaction that
+// resumes within a run can go unnoticed for up to one interval.
+const USER_INTERACTION_ACTIVE = "user-interaction-active-non-synthesized";
+const USER_INTERACTION_INACTIVE = "user-interaction-inactive-non-synthesized";
 
 /**
  * Glean session types for OHTTP ping optimization.
@@ -128,6 +135,15 @@ const PRIVATE_PING_SURFACE_COUNTRY_MAP = {
 // Used as the missing value for timestamps in the session ping
 const TIMESTAMP_MISSING_VALUE = -1;
 
+// The scroll distance in pixels each newtab ping scroll metric reports on,
+// in ascending order. Must stay in sync with SCROLL_TELEMETRY_THRESHOLDS in
+// content-src/components/Base/Base.jsx.
+const SCROLL_THRESHOLD_METRICS = [
+  [50, "scroll"],
+  [100, "scroll100"],
+  [250, "scroll250"],
+];
+
 // Page filter for onboarding telemetry, any value other than these will
 // be set as "other"
 const ONBOARDING_ALLOWED_PAGE_VALUES = [
@@ -162,6 +178,15 @@ export class TelemetryFeed {
    * Events are stored here and cleared at session end based on session type.
    */
   #eventBuffer = [];
+
+  /** Whether the user is currently interacting. Drives the dwell stopwatches. */
+  #userActive = false;
+
+  /**
+   * When the last "active" notification arrived, i.e. the most recent moment we
+   * know the user was interacting. Null before the first one.
+   */
+  #lastActiveAt = null;
 
   constructor() {
     this.sessions = new Map();
@@ -200,10 +225,6 @@ export class TelemetryFeed {
 
   get privatePingEnabled() {
     return this._prefs.get(PREF_PRIVATE_PING_ENABLED);
-  }
-
-  get redactNewTabPingEnabled() {
-    return this._prefs.get(PREF_REDACT_NEWTAB_PING_ENABLED);
   }
 
   get privatePingInferredInterestsEnabled() {
@@ -253,6 +274,13 @@ export class TelemetryFeed {
   get inferredTelemetrySettingsOverrides() {
     return this.store?.getState()?.InferredPersonalization
       ?.inferredTelemetrySettingsOverrides;
+  }
+
+  get tileIdRedactedForSponsored() {
+    return (
+      this.store?.getState()?.Prefs.values?.trainhopConfig?.newtabPing
+        ?.redactTileIdForSponsored || false
+    );
   }
 
   /**
@@ -486,6 +514,8 @@ export class TelemetryFeed {
         this.browserOpenNewtabStart,
         "browser-open-newtab-start"
       );
+      Services.obs.addObserver(this, USER_INTERACTION_ACTIVE);
+      Services.obs.addObserver(this, USER_INTERACTION_INACTIVE);
     }
 
     // Set two scalars for the "deletion-request" ping (See bug 1602064 and 1729474)
@@ -597,14 +627,13 @@ export class TelemetryFeed {
 
   /**
    * Removes fields that link to any user content preference.
-   * Redactions only occur if the appropriate pref is enabled.
    *
    * @param {*} pingDict Input dictionary
    * @param {boolean} isSponsored Is this in ad, in which case there is nothing we can redact currently
-   * @returns {*} Possibly redacted dictionary
+   * @returns {*} Redacted dictionary
    */
   redactNewTabPing(pingDict, isSponsored = false) {
-    if (this.redactNewTabPingEnabled && !isSponsored) {
+    if (!isSponsored) {
       const {
         // eslint-disable-next-line no-unused-vars
         corpus_item_id,
@@ -623,22 +652,25 @@ export class TelemetryFeed {
       result.content_redacted = true;
       return result;
     }
-    // For spocs we need to retain the tile id.
-    if (this.redactNewTabPingEnabled && isSponsored) {
-      const {
-        // eslint-disable-next-line no-unused-vars
-        section,
-        // eslint-disable-next-line no-unused-vars
-        selected_topics,
-        // eslint-disable-next-line no-unused-vars
-        topic,
-        ...result
-      } = pingDict;
-      result.content_redacted = true;
-      return result;
+
+    const {
+      // eslint-disable-next-line no-unused-vars
+      section,
+      // eslint-disable-next-line no-unused-vars
+      selected_topics,
+      // eslint-disable-next-line no-unused-vars
+      topic,
+      ...result
+    } = pingDict;
+
+    // For spocs we need to retain the tile id, unless we're configured to
+    // redact it.
+    if (this.tileIdRedactedForSponsored) {
+      delete result.tile_id;
     }
 
-    return pingDict; // No modification
+    result.content_redacted = true;
+    return result;
   }
 
   /**
@@ -683,10 +715,15 @@ export class TelemetryFeed {
       session_id: String(Services.uuid.generateUUID()),
       // "unknown" will be overwritten when appropriate
       page: url ? url : "unknown",
+      max_scroll_threshold: 0,
       perf: {
         load_trigger_type,
         is_preloaded: false,
       },
+      // Dwell stopwatch: time accrued so far, and when the current run started
+      // (null when stopped).
+      dwellTimeMs: 0,
+      dwellStartedAt: null,
     };
 
     if (load_trigger_ts) {
@@ -719,15 +756,32 @@ export class TelemetryFeed {
       return;
     }
 
+    this.#stopDwellClock(session);
+
     Glean.newtab.closed.record({ newtab_visit_id: session.session_id });
     if (
       this.telemetryEnabled &&
       Services.prefs.getBoolPref(PREF_NEWTAB_PING_ENABLED, true)
     ) {
+      // Record before the submit below: submitting clears ping-lifetime
+      // metrics, so a later value would never be sent. Recording here rather
+      // than unconditionally also keeps a session from leaving a sample behind
+      // for a later ping to pick up when no ping is submitted for this one.
+      const dwellMs = Math.round(session.dwellTimeMs);
+      if (dwellMs > 0) {
+        Glean.newtab.dwellTime.accumulateSingleSample(dwellMs);
+      }
+
       // clear event buffer based on session type
       const recordToContentPing =
         this.gleanSessionType === GleanSessionType.PrivateGleanSession;
       this.#clearEventBuffer(recordToContentPing, session.session_id);
+      for (const [threshold, metric] of SCROLL_THRESHOLD_METRICS) {
+        // The metric is undefined rather than registered if this add-on has
+        // train-hopped to a Firefox that predates it, in which case the rest
+        // of the ping should still be submitted.
+        Glean.newtab[metric]?.set(session.max_scroll_threshold >= threshold);
+      }
       GleanPings.newtab.submit("newtab_session_end");
       if (this.privatePingEnabled) {
         this.configureContentPing();
@@ -755,6 +809,119 @@ export class TelemetryFeed {
   }
 
   /**
+   * The frontmost window, or null if Firefox is not the active application.
+   * Separate from isSessionInForeground so tests can stub it.
+   *
+   * @returns {Window|null}
+   */
+  getActiveChromeWindow() {
+    return Services.focus.activeWindow;
+  }
+
+  /**
+   * Monotonic time in milliseconds. A method so tests can stub the clock.
+   *
+   * @returns {number}
+   */
+  now() {
+    return ChromeUtils.now();
+  }
+
+  /**
+   * Whether this session's newtab is the selected tab of the frontmost window.
+   * A preloaded newtab never qualifies because its browser isn't in a tab yet.
+   *
+   * Known gap: dragging the tab to another window gives it a new <browser>, so
+   * the session stops qualifying, and accruing, for the rest of its life.
+   *
+   * @param  {obj} session a session from this.sessions
+   * @param  {Window|null} [activeWindow] the frontmost window, read if omitted
+   * @returns {boolean}
+   */
+  isSessionInForeground(session, activeWindow = this.getActiveChromeWindow()) {
+    const browser = session.browserRef?.deref();
+    const win = browser?.documentGlobal;
+    return (
+      !!win &&
+      !win.closed &&
+      win === activeWindow &&
+      win.gBrowser?.selectedBrowser === browser
+    );
+  }
+
+  /**
+   * Interaction is under way. Start the stopwatch for the newtab in front of
+   * the user, and stop it for every other session.
+   *
+   * Foreground is rechecked on every notification, not just on
+   * active/inactive changes. No foreground signal reaches this feed, so these
+   * notifications are also how often we sample it.
+   */
+  #onUserInteractionActive() {
+    this.#userActive = true;
+    const now = this.now();
+    this.#lastActiveAt = now;
+    // Read once for the whole sweep, and only when a session might ask for it.
+    const activeWindow = this.sessions.size
+      ? this.getActiveChromeWindow()
+      : null;
+
+    for (const session of this.sessions.values()) {
+      if (this.isSessionInForeground(session, activeWindow)) {
+        session.dwellStartedAt ??= now;
+      } else {
+        this.#stopDwellClock(session, now);
+      }
+    }
+  }
+
+  /**
+   * The last interval saw no interaction, so stop every stopwatch. Credit only
+   * up to the last notification that said the user was there. Using that
+   * timestamp rather than subtracting the interval pref keeps the cutoff exact
+   * when the timer is late or the clock jumps.
+   */
+  #onUserInteractionInactive() {
+    this.#userActive = false;
+    const cutoff = this.#lastActiveAt ?? this.now();
+    for (const session of this.sessions.values()) {
+      this.#stopDwellClock(session, cutoff);
+    }
+  }
+
+  /**
+   * Start a session's stopwatch if the user is already interacting when the
+   * newtab becomes visible. Without this, a visit shorter than one interval
+   * would see no notification and record nothing.
+   *
+   * @param  {obj} session a session from this.sessions
+   */
+  #startDwellClockIfActive(session) {
+    if (
+      session.dwellStartedAt === null &&
+      this.#userActive &&
+      this.isSessionInForeground(session)
+    ) {
+      session.dwellStartedAt = this.now();
+    }
+  }
+
+  /**
+   * Stop a session's stopwatch, crediting time up to `cutoff`. Clamped at zero,
+   * so a run that started after `cutoff` adds nothing instead of subtracting.
+   *
+   * @param  {obj} session a session from this.sessions
+   * @param  {number} [cutoff] a this.now() timestamp, defaulting to now
+   */
+  #stopDwellClock(session, cutoff = this.now()) {
+    if (session.dwellStartedAt === null) {
+      return;
+    }
+    session.dwellTimeMs += Math.max(0, cutoff - session.dwellStartedAt);
+    session.dwellStartedAt = null;
+  }
+
+  /**
    * handleNewTabInit - Handle NEW_TAB_INIT, which creates a new session and sets the a flag
    *                    for session.perf based on whether or not this new tab is preloaded
    *
@@ -767,6 +934,27 @@ export class TelemetryFeed {
     );
     session.perf.is_preloaded =
       action.data.browser.getAttribute("preloadedState") === "preloaded";
+    // Weak, so a session that never gets NEW_TAB_UNLOAD cannot keep a <browser>
+    // alive past its tab. The preloaded-browser swap reuses this element, so
+    // the reference survives it.
+    session.browserRef = new WeakRef(action.data.browser);
+  }
+
+  /**
+   * Handle NEW_TAB_SCROLL, which records the deepest scroll threshold passed
+   * so far in a session. The scroll metrics are set from it in endSession.
+   *
+   * @param  {obj} action the Action object
+   */
+  handleNewTabScroll(action) {
+    const session = this.sessions.get(au.getPortIdOfSender(action));
+    if (!session) {
+      return;
+    }
+    session.max_scroll_threshold = Math.max(
+      session.max_scroll_threshold,
+      action.data.threshold
+    );
   }
 
   sovEnabled() {
@@ -937,7 +1125,6 @@ export class TelemetryFeed {
       case "PIN": {
         Glean.topsites.pin.record({
           newtab_visit_id: session.session_id,
-          is_sponsored: false,
           position: action.data.action_position,
         });
         break;
@@ -945,7 +1132,6 @@ export class TelemetryFeed {
       case "UNPIN": {
         Glean.topsites.unpin.record({
           newtab_visit_id: session.session_id,
-          is_sponsored: false,
           position: action.data.action_position,
         });
         break;
@@ -953,7 +1139,6 @@ export class TelemetryFeed {
       case "TOP_SITES_ADD": {
         Glean.topsites.add.record({
           newtab_visit_id: session.session_id,
-          is_sponsored: false,
           position: action.data.action_position,
         });
         break;
@@ -961,7 +1146,6 @@ export class TelemetryFeed {
       case "TOP_SITES_EDIT": {
         Glean.topsites.edit.record({
           newtab_visit_id: session.session_id,
-          is_sponsored: false,
           position: action.data.action_position,
           has_title_changed: action.data.hasTitleChanged,
           has_url_changed: action.data.hasURLChanged,
@@ -1095,7 +1279,6 @@ export class TelemetryFeed {
           layout_name,
           matches_selected_topic,
           received_rank,
-          recommendation_id,
           recommended_at,
           scheduled_corpus_item_id,
           section_position,
@@ -1149,9 +1332,7 @@ export class TelemetryFeed {
                   received_rank,
                   recommended_at,
                 }
-              : {
-                  recommendation_id,
-                }),
+              : {}),
           };
           if (this.trainhopClickOnlyEnabled) {
             this.transitionToPrivateSession();
@@ -1522,7 +1703,7 @@ export class TelemetryFeed {
         this.endSession(au.getPortIdOfSender(action));
         break;
       case at.NEW_TAB_SCROLL:
-        Glean.newtab.scroll.set(true);
+        this.handleNewTabScroll(action);
         break;
       case at.SAVE_SESSION_PERF_DATA:
         this.saveSessionPerfData(au.getPortIdOfSender(action), action.data);
@@ -1593,10 +1774,19 @@ export class TelemetryFeed {
         this.handleCardSectionUserEvent(action);
         break;
       }
+      case at.CAROUSEL_NAVIGATE:
+      // Intentional fall-through
+      case at.CAROUSEL_TOGGLE_AUTOPLAY: {
+        this.handleCarouselUserEvent(action);
+        break;
+      }
       case at.INLINE_SELECTION_CLICK:
       // Intentional fall-through
       case at.INLINE_SELECTION_IMPRESSION:
         this.handleInlineSelectionUserEvent(action);
+        break;
+      case at.TOPIC_NAVIGATION_CLICK:
+        this.handleTopicNavigationUserEvent(action);
         break;
       case at.REPORT_AD_SUBMIT:
         this.handleReportAdUserEvent(action);
@@ -1610,6 +1800,9 @@ export class TelemetryFeed {
       case at.WIDGETS_TIMER_USER_EVENT:
       case at.WIDGETS_TIMER_USER_IMPRESSION:
         this.handleWidgetsUserEvent(action);
+        break;
+      case at.SPACES_USER_EVENT:
+        this.handleSpacesUserEvent(action);
         break;
       case at.WIDGETS_USER_EVENT:
         this.handleUnifiedWidgetUserEvent(action);
@@ -1639,6 +1832,14 @@ export class TelemetryFeed {
         this.recordEnabledWidgets();
         this.initializeMac();
         this.recordPageLayoutVariant();
+        break;
+      case at.PREF_CHANGED:
+        // Turning history off hides history-dependent widgets, so the enabled
+        // list has to be re-read: unlike a widget's own pref, this flips
+        // enablement without any widget toggle to hang the update off.
+        if (action.data?.name === "recordsHistory") {
+          this.recordEnabledWidgets();
+        }
         break;
     }
   }
@@ -1692,6 +1893,18 @@ export class TelemetryFeed {
           Glean.newtab.widgetsTimerImpression.record(payload);
           break;
       }
+    }
+  }
+
+  handleSpacesUserEvent(action) {
+    const session = this.sessions.get(au.getPortIdOfSender(action));
+    if (session) {
+      Glean.newtab.spacesSwitch.record({
+        newtab_visit_id: session.session_id,
+        space: action.data.space,
+        previous_space: action.data.previous_space,
+        method: action.data.method,
+      });
     }
   }
 
@@ -1951,6 +2164,34 @@ export class TelemetryFeed {
     }
   }
 
+  handleCarouselUserEvent(action) {
+    const session = this.sessions.get(au.getPortIdOfSender(action));
+    if (!session) {
+      return;
+    }
+
+    const { section, section_position, direction, slide_index, paused } =
+      action.data;
+    const gleanData = {
+      newtab_visit_id: session.session_id,
+      section,
+      section_position,
+    };
+
+    switch (action.type) {
+      case "CAROUSEL_NAVIGATE":
+        Glean.newtab.carouselNavigate.record({
+          ...gleanData,
+          direction,
+          slide_index,
+        });
+        break;
+      case "CAROUSEL_TOGGLE_AUTOPLAY":
+        Glean.newtab.carouselToggleAutoplay.record({ ...gleanData, paused });
+        break;
+    }
+  }
+
   handleCardSectionUserEvent(action) {
     const session = this.sessions.get(au.getPortIdOfSender(action));
     if (session) {
@@ -2083,6 +2324,20 @@ export class TelemetryFeed {
           break;
       }
     }
+  }
+
+  handleTopicNavigationUserEvent(action) {
+    const session = this.sessions.get(au.getPortIdOfSender(action));
+    if (!session) {
+      return;
+    }
+
+    const { topic, event_source } = action.data;
+    Glean.newtab.topicNavigationClick.record({
+      newtab_visit_id: session.session_id,
+      topic,
+      event_source,
+    });
   }
 
   handleTopicSelectionUserEvent(action) {
@@ -2273,9 +2528,7 @@ export class TelemetryFeed {
                 received_rank: datum.received_rank,
                 recommended_at: datum.recommended_at,
               }
-            : {
-                recommendation_id: datum.recommendation_id,
-              }),
+            : {}),
         };
 
         if (this.trainhopClickOnlyEnabled) {
@@ -2391,9 +2644,7 @@ export class TelemetryFeed {
               received_rank: tile.received_rank,
               recommended_at: tile.recommended_at,
             }
-          : {
-              recommendation_id: tile.recommendation_id,
-            }),
+          : {}),
       };
       this.recordOrQueueEvent(
         "impression",
@@ -2472,6 +2723,7 @@ export class TelemetryFeed {
 
     if (data.visibility_event_rcvd_ts && !session.newtabOpened) {
       session.newtabOpened = true;
+      this.#startDwellClockIfActive(session);
       const source = ONBOARDING_ALLOWED_PAGE_VALUES.includes(session.page)
         ? session.page
         : "other";
@@ -2506,6 +2758,17 @@ export class TelemetryFeed {
   }
 
   observe(subject, topic, data) {
+    // Before the pref branch below, which switches on `data` and would read
+    // these topics' null data as a pref name.
+    switch (topic) {
+      case USER_INTERACTION_ACTIVE:
+        this.#onUserInteractionActive();
+        return;
+      case USER_INTERACTION_INACTIVE:
+        this.#onUserInteractionInactive();
+        return;
+    }
+
     if (data === TOP_SITES_BLOCKED_SPONSORS_PREF) {
       this._setBlockedSponsorsMetrics();
     } else if (data === TOPIC_SELECTION_SELECTED_TOPICS_PREF) {
@@ -2581,10 +2844,16 @@ export class TelemetryFeed {
         this.browserOpenNewtabStart,
         "browser-open-newtab-start"
       );
+      Services.obs.removeObserver(this, USER_INTERACTION_ACTIVE);
+      Services.obs.removeObserver(this, USER_INTERACTION_INACTIVE);
+      this.#userActive = false;
+      this.#lastActiveAt = null;
       this._initialized = false;
     }
 
     // TODO: The sessions still in this.sessions are not reported as ended;
-    // only their buffered events are flushed above.
+    // only their buffered events are flushed above. They also drop whatever
+    // dwell time they accrued, which biases newtab.dwell_time low. The newtab
+    // in front of the user at shutdown is the one most likely to have some.
   }
 }

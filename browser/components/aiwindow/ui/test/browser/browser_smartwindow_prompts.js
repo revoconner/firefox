@@ -18,20 +18,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
     "moz-src:///browser/components/aiwindow/ui/modules/AIWindowUI.sys.mjs",
 });
 
-// Aliased: head.js already declares _setLoadPromptForTesting for
-// ChatConversation.sys.mjs's own lazy.loadPrompt, a different module.
-const {
-  _setLoadPromptForTesting: _setConversationSuggestionsLoadPromptForTesting,
-  _setBuildConversationForTesting,
-  _setGetConversationsByIdForTesting,
-  _clearResumeActivityCacheForTesting,
-} = ChromeUtils.importESModule(
-  "moz-src:///browser/components/aiwindow/models/ConversationSuggestions.sys.mjs"
-);
-const { MemoriesManager } = ChromeUtils.importESModule(
-  "moz-src:///browser/components/aiwindow/models/memories/MemoriesManager.sys.mjs"
-);
-
 const PROMPTS_PAGE =
   "chrome://mochitests/content/browser/browser/components/aiwindow/ui/test/browser/test_smartwindow_prompts_page.html";
 
@@ -161,123 +147,6 @@ function startMockNonStreamingServer(responseContent) {
       pendingResponses.length = 0;
     },
   };
-}
-
-async function stubResumeActivityGeneration(sb) {
-  const urls = [1, 2, 3, 4, 5].map(id => ({
-    url: `https://example.com/${id}`,
-    title: `Example ${id}`,
-  }));
-  for (const [index, page] of urls.entries()) {
-    await PlacesUtils.history.insert({
-      ...page,
-      visits: [
-        {
-          date: new Date(Date.now() - (urls.length - index) * 60_000),
-          transition: PlacesUtils.history.TRANSITIONS.LINK,
-        },
-      ],
-    });
-  }
-
-  const memories = [
-    {
-      id: "memory-1",
-      memory_summary: "Research project",
-      source_ids: {
-        history_source_ids: urls
-          .slice(0, 4)
-          .map(({ url }) => PlacesUtils.history.hashURL(url)),
-      },
-    },
-    {
-      id: "memory-2",
-      memory_summary: "Trip planning",
-      source_ids: {
-        history_source_ids: [PlacesUtils.history.hashURL(urls[4].url)],
-      },
-    },
-  ];
-
-  const getMemoriesStub = sb
-    .stub(MemoriesManager, "getMemoriesByAttribute")
-    .resolves(memories);
-  // Keep cached results from being filtered as deleted.
-  sb.stub(MemoriesManager, "getAllMemories").resolves(memories);
-  // Prevent cached results from leaking between tests.
-  _clearResumeActivityCacheForTesting();
-  _setGetConversationsByIdForTesting(async () => []);
-  _setConversationSuggestionsLoadPromptForTesting(async () => ({
-    prompt: "Test prompt",
-  }));
-  _setBuildConversationForTesting(async () => ({
-    setSystemMessage() {},
-    addUserMessage() {},
-    securityProperties: {
-      setPrivateData() {},
-      setUntrustedInput() {},
-      commit() {},
-    },
-    run: sb.stub().resolves({
-      finalOutput: JSON.stringify([
-        {
-          id: 0,
-          headline: "Pick up your research",
-          status: "Continue reading",
-        },
-      ]),
-    }),
-  }));
-  sb.stub(openAIEngine, "getFxAccountToken").resolves(null);
-
-  return {
-    getMemoriesStub,
-    memories,
-    async cleanup() {
-      _setGetConversationsByIdForTesting(null);
-      _setConversationSuggestionsLoadPromptForTesting(null);
-      _setBuildConversationForTesting(null);
-      _clearResumeActivityCacheForTesting();
-      for (const { url } of urls) {
-        await PlacesUtils.history.remove(url);
-      }
-    },
-  };
-}
-
-/**
- * Shared setup/teardown for tests that click a resume pill: enables the
- * memories prefs, stubs resume-activity generation so a real pill renders,
- * opens the AI Window, and hands the caller its buttons to click. `run`
- * supplies whatever additional stubs it needs (engine build, fetchWithHistory,
- * etc.) via its own sandbox before calling this.
- *
- * @param {object} sb - Sinon sandbox, owned and restored by the caller
- * @param {Function} run - Async callback invoked with
- *   {win, browser, aiWindow, buttons}
- */
-async function testResumeActivityClick(sb, run) {
-  await SpecialPowers.pushPrefEnv({
-    set: [
-      ["browser.smartwindow.memories.generateFromConversation", true],
-      ["browser.smartwindow.memories.generateFromHistory", true],
-    ],
-  });
-  const resumeActivityStubs = await stubResumeActivityGeneration(sb);
-  let win;
-  try {
-    win = await openAIWindow();
-    const browser = win.gBrowser.selectedBrowser;
-    const aiWindow = browser.contentDocument.querySelector("ai-window");
-    const buttons = await getPromptButtons(browser);
-    await run({ win, browser, aiWindow, buttons });
-  } finally {
-    if (win) {
-      await BrowserTestUtils.closeWindow(win);
-    }
-    await resumeActivityStubs.cleanup();
-    await SpecialPowers.popPrefEnv();
-  }
 }
 
 describe("sidebar conversation starter prompts", () => {
@@ -765,9 +634,10 @@ add_task(async function test_resume_prompt_click_shows_confirmation_card() {
         {
           uiType: "tab-group-confirmation",
           toolCallId: "resume-activity-memory-1",
+          isResumeActivity: true,
           properties: {
             actionType: "open_tabs",
-            tabGroupLabel: "Pick up your research",
+            tabGroupLabel: "Your research",
             tabs: [1, 2, 3, 4].map((id, index) => ({
               token: String(index),
               url: `https://example.com/${id}`,
@@ -848,9 +718,10 @@ add_task(
           {
             uiType: "tab-group-confirmation",
             toolCallId: "resume-activity-memory-1",
+            isResumeActivity: true,
             properties: {
               actionType: "open_tabs",
-              tabGroupLabel: "Pick up your research",
+              tabGroupLabel: "Your research",
               tabs: [1, 2, 3, 4].map((id, index) => ({
                 token: String(index),
                 url: `https://example.com/${id}`,
@@ -1279,3 +1150,222 @@ add_task(
     }
   }
 );
+
+function buildManyPrompts(count = 10) {
+  return Array.from({ length: count }, (_, i) => ({
+    text: `Overflow test prompt number ${i}`,
+    type: "chat",
+  }));
+}
+
+/**
+ * Shrinks the element to a fixed width narrow enough to force overflow,
+ * and waits for the resulting (ResizeObserver-driven, async) scroll-state
+ * update, rather than asserting immediately after the style change.
+ *
+ * @param {HTMLElement} el
+ */
+async function forceOverflowByShrinking(el) {
+  el.style.cssText = "display: block; width: 250px;";
+  await TestUtils.waitForCondition(
+    () => el.canScrollEnd,
+    "Wait for the resize observer to detect overflow"
+  );
+}
+
+add_task(async function test_prompts_no_scroll_when_content_fits() {
+  const tab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    PROMPTS_PAGE
+  );
+  try {
+    const el = await createPromptsElement(tab, [
+      { text: "Write a first draft", type: "chat" },
+      { text: "Brainstorm ideas", type: "chat" },
+    ]);
+    Assert.ok(
+      !el.shadowRoot.querySelector(".sw-prompts-scroll-button"),
+      "No scroll arrows should render when content fits"
+    );
+  } finally {
+    BrowserTestUtils.removeTab(tab);
+  }
+});
+
+add_task(async function test_prompts_shows_end_arrow_when_overflowing() {
+  const tab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    PROMPTS_PAGE
+  );
+  try {
+    const el = await createPromptsElement(tab, buildManyPrompts());
+    await forceOverflowByShrinking(el);
+
+    Assert.ok(
+      el.shadowRoot.querySelector(".sw-prompts-scroll-end"),
+      "End arrow should render"
+    );
+    Assert.ok(
+      !el.shadowRoot.querySelector(".sw-prompts-scroll-start"),
+      "Start arrow should not render at the very start"
+    );
+  } finally {
+    BrowserTestUtils.removeTab(tab);
+  }
+});
+
+add_task(
+  async function test_prompts_scroll_end_arrow_advances_and_reveals_start_arrow() {
+    const tab = await BrowserTestUtils.openNewForegroundTab(
+      gBrowser,
+      PROMPTS_PAGE
+    );
+    // Reduced motion turns off scroll-behavior: smooth, so each click
+    // settles immediately instead of racing an in-flight animation.
+    await SpecialPowers.pushPrefEnv({
+      set: [["ui.prefersReducedMotion", 1]],
+    });
+    try {
+      const el = await createPromptsElement(tab, buildManyPrompts());
+      await forceOverflowByShrinking(el);
+
+      el.shadowRoot.querySelector(".sw-prompts-scroll-end").click();
+      await TestUtils.waitForCondition(
+        () => el.canScrollStart,
+        "Wait for the scroll to advance past the first pill"
+      );
+
+      Assert.ok(
+        el.shadowRoot.querySelector(".sw-prompts-scroll-start"),
+        "Start arrow should render once scrolled forward"
+      );
+    } finally {
+      BrowserTestUtils.removeTab(tab);
+      await SpecialPowers.popPrefEnv();
+    }
+  }
+);
+
+add_task(
+  async function test_prompts_scroll_stops_at_last_pill_without_wrapping() {
+    const tab = await BrowserTestUtils.openNewForegroundTab(
+      gBrowser,
+      PROMPTS_PAGE
+    );
+    await SpecialPowers.pushPrefEnv({
+      set: [["ui.prefersReducedMotion", 1]],
+    });
+    try {
+      const prompts = buildManyPrompts();
+      const el = await createPromptsElement(tab, prompts);
+      await forceOverflowByShrinking(el);
+
+      // More clicks than there are pills - should hold at the last pill
+      // rather than wrapping back around to the first.
+      for (let i = 0; i < prompts.length + 2; i++) {
+        const endButton = el.shadowRoot.querySelector(".sw-prompts-scroll-end");
+        if (!endButton) {
+          break;
+        }
+        endButton.click();
+        await TestUtils.waitForTick();
+      }
+
+      await TestUtils.waitForCondition(
+        () => !el.canScrollEnd,
+        "Wait for the last pill to settle into view"
+      );
+      Assert.ok(
+        el.canScrollStart,
+        "Should still be able to scroll back from the end"
+      );
+    } finally {
+      BrowserTestUtils.removeTab(tab);
+      await SpecialPowers.popPrefEnv();
+    }
+  }
+);
+
+add_task(async function test_prompts_resize_updates_scroll_state() {
+  const tab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    PROMPTS_PAGE
+  );
+  try {
+    const el = await createPromptsElement(tab, buildManyPrompts());
+    await forceOverflowByShrinking(el);
+
+    el.style.width = "10000px";
+    await TestUtils.waitForCondition(
+      () => !el.canScrollEnd,
+      "Wait for the resize observer to detect the content now fits"
+    );
+    Assert.ok(
+      !el.shadowRoot.querySelector(".sw-prompts-scroll-button"),
+      "No scroll arrows should render once widened to fit"
+    );
+  } finally {
+    BrowserTestUtils.removeTab(tab);
+  }
+});
+
+add_task(async function test_prompts_resize_observer_reattaches_after_empty() {
+  const tab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    PROMPTS_PAGE
+  );
+  try {
+    const el = await createPromptsElement(tab, buildManyPrompts());
+    const win = tab.linkedBrowser.contentWindow;
+
+    // render() omits the container while prompts is empty, detaching it.
+    // Let the resulting disconnect-triggered resize notification settle
+    // before continuing, so it can't mask a stale observer later.
+    el.prompts = [];
+    await el.updateComplete;
+    await new Promise(resolve =>
+      win.requestAnimationFrame(() => win.requestAnimationFrame(resolve))
+    );
+
+    // A new container is created here; the observer must re-attach to it.
+    el.prompts = buildManyPrompts();
+    await el.updateComplete;
+    Assert.ok(
+      !el.canScrollEnd,
+      "Sanity check: the new container isn't overflowing yet"
+    );
+
+    await forceOverflowByShrinking(el);
+    Assert.ok(
+      el.shadowRoot.querySelector(".sw-prompts-scroll-end"),
+      "Resize observer should still detect overflow on the recreated container"
+    );
+  } finally {
+    BrowserTestUtils.removeTab(tab);
+  }
+});
+
+add_task(async function test_prompts_rtl_overflow_scroll_state() {
+  const tab = await BrowserTestUtils.openNewForegroundTab(
+    gBrowser,
+    PROMPTS_PAGE
+  );
+  try {
+    const el = await createPromptsElement(tab, buildManyPrompts());
+    el.setAttribute("dir", "rtl");
+    await forceOverflowByShrinking(el);
+
+    Assert.ok(
+      el.shadowRoot.querySelector(".sw-prompts-scroll-end"),
+      "End arrow should render in RTL too"
+    );
+
+    el.shadowRoot.querySelector(".sw-prompts-scroll-end").click();
+    await TestUtils.waitForCondition(
+      () => el.canScrollStart,
+      "Wait for the scroll to advance past the first pill in RTL"
+    );
+  } finally {
+    BrowserTestUtils.removeTab(tab);
+  }
+});

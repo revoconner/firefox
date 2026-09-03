@@ -22,11 +22,11 @@ ChromeUtils.defineESModuleGetters(lazy, {
   NimbusFeatures: "resource://nimbus/ExperimentAPI.sys.mjs",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
   SearchUIUtils: "moz-src:///browser/components/search/SearchUIUtils.sys.mjs",
-  SessionStartup: "resource:///modules/sessionstore/SessionStartup.sys.mjs",
+  SessionStartup:
+    "moz-src:///browser/components/sessionstore/SessionStartup.sys.mjs",
   ShellService: "moz-src:///browser/components/shell/ShellService.sys.mjs",
   SpecialMessageActions:
     "resource://messaging-system/lib/SpecialMessageActions.sys.mjs",
-  UpdatePing: "resource://gre/modules/UpdatePing.sys.mjs",
 });
 
 /**
@@ -982,11 +982,14 @@ nsBrowserContentHandler.prototype = {
               lazy.UpdateManager.updateInstalledAtStartup().then(
                 async updateInstalledAtStartup => {
                   if (updateInstalledAtStartup) {
-                    await lazy.UpdatePing.handleUpdateSuccess(
-                      old_mstone,
-                      old_buildId,
-                      progress
+                    Glean.update.previousChannel.set(
+                      updateInstalledAtStartup.channel
                     );
+                    Glean.update.previousVersion.set(old_mstone);
+                    Glean.update.previousBuildId.set(old_buildId);
+                    GleanPings.update.submit("success");
+                    progress.updateFetched = true;
+                    progress.payloadCreated = true;
                   }
                 }
               );
@@ -1010,17 +1013,12 @@ nsBrowserContentHandler.prototype = {
             let updateInstalledAtStartup = spinForUpdateInstalledAtStartup();
 
             if (updateInstalledAtStartup) {
-              let handleUpdateSuccessTask = lazy.UpdatePing.handleUpdateSuccess(
-                old_mstone,
-                old_buildId,
-                progress
+              Glean.update.previousChannel.set(
+                updateInstalledAtStartup.channel
               );
-
-              lazy.AsyncShutdown.profileBeforeChange.addBlocker(
-                "BrowserContentHandler: running handleUpdateSuccess",
-                handleUpdateSuccessTask,
-                { fetchState: () => ({ progress }) }
-              );
+              Glean.update.previousVersion.set(old_mstone);
+              Glean.update.previousBuildId.set(old_buildId);
+              GleanPings.update.submit("success");
 
               lazy.LaterRun.enable(lazy.LaterRun.ENABLE_REASON_UPDATE_APPLIED);
             }

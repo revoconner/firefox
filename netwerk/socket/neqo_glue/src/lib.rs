@@ -521,7 +521,6 @@ impl NeqoHttp3Conn {
             .max_table_size_encoder(max_table_size)
             .max_table_size_decoder(max_table_size)
             .max_blocked_streams(max_blocked_streams)
-            .max_concurrent_push_streams(0)
             .connection_parameters(params)
             .webtransport(webtransport)
             .connect(true)
@@ -714,6 +713,19 @@ impl NeqoHttp3Conn {
         };
         glean::http_3_quic_version.get(version_label).add(1);
 
+        // neqo's `pto_counts` is a sliding histogram: the highest set bucket is
+        // the longest run of consecutive PTOs the connection saw, i.e. how deep
+        // it fell into a black hole. Record that run length once per connection.
+        let max_consecutive_ptos = i64::try_from(
+            stats
+                .pto_counts
+                .iter()
+                .rposition(|&count| count > 0)
+                .map_or(0, |i| i + 1),
+        )
+        .unwrap_or(i64::MAX);
+        glean::http_3_max_consecutive_ptos.accumulate_single_sample_signed(max_consecutive_ptos);
+
         if !static_prefs::pref!("network.http.http3.use_nspr_for_io")
             && static_prefs::pref!("network.http.http3.ecn_report")
         {
@@ -815,7 +827,7 @@ impl NeqoHttp3Conn {
             glean::http_3_slow_start_exited.get("not_exited").add(1);
         }
 
-        let cwnd_that_grew = stats.cc.cwnd.filter(|&c| c > MAX_INITIAL_CWND);
+        let cwnd_that_grew = (stats.cc.cwnd > MAX_INITIAL_CWND).then_some(stats.cc.cwnd);
         let growth_label = match (
             cwnd_that_grew,
             stats.cc.slow_start_exit.as_ref().map(|e| e.exit_cwnd),
@@ -1787,6 +1799,7 @@ impl From<TransportError> for CloseError {
             TransportError::NotAvailable => Self::TransportInternalErrorOther(28),
             TransportError::DisabledVersion => Self::TransportInternalErrorOther(29),
             TransportError::UnknownTransportParameter => Self::TransportInternalErrorOther(30),
+            TransportError::TooManyPtos => Self::TransportInternalErrorOther(31),
         }
     }
 }
@@ -1845,6 +1858,7 @@ const fn transport_error_to_glean_label(error: &TransportError) -> &'static str 
         TransportError::VersionNegotiation => "VersionNegotiation",
         TransportError::WrongRole => "WrongRole",
         TransportError::UnknownTransportParameter => "UnknownTransportParameter",
+        TransportError::TooManyPtos => "TooManyPtos",
     }
 }
 
@@ -2228,49 +2242,6 @@ pub extern "C" fn neqo_http3conn_event(
                 stream_id: stream_id.as_u64(),
                 error,
                 local,
-            },
-            Http3ClientEvent::PushPromise {
-                push_id,
-                request_stream_id,
-                headers,
-            } => {
-                let res = convert_h3_to_h1_headers(&headers, data);
-                if res != NS_OK {
-                    return res;
-                }
-                Http3Event::PushPromise {
-                    push_id: push_id.into(),
-                    request_stream_id: request_stream_id.as_u64(),
-                }
-            }
-            Http3ClientEvent::PushHeaderReady {
-                push_id,
-                headers,
-                fin,
-                interim,
-            } => {
-                if interim {
-                    Http3Event::NoEvent
-                } else {
-                    let res = convert_h3_to_h1_headers(&headers, data);
-                    if res != NS_OK {
-                        return res;
-                    }
-                    Http3Event::PushHeaderReady {
-                        push_id: push_id.into(),
-                        fin,
-                    }
-                }
-            }
-            Http3ClientEvent::PushDataReadable { push_id } => Http3Event::PushDataReadable {
-                push_id: push_id.into(),
-            },
-            Http3ClientEvent::PushCanceled { push_id } => Http3Event::PushCanceled {
-                push_id: push_id.into(),
-            },
-            Http3ClientEvent::PushReset { push_id, error } => Http3Event::PushReset {
-                push_id: push_id.into(),
-                error,
             },
             Http3ClientEvent::RequestsCreatable => Http3Event::RequestsCreatable,
             Http3ClientEvent::AuthenticationNeeded => Http3Event::AuthenticationNeeded,

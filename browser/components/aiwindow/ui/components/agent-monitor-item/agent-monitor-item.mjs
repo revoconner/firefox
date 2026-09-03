@@ -16,6 +16,8 @@ import "chrome://global/content/elements/moz-select.mjs";
 import "chrome://global/content/elements/moz-button.mjs";
 // eslint-disable-next-line import/no-unassigned-import
 import "chrome://browser/content/aiwindow/components/monitor-icon.mjs";
+// eslint-disable-next-line import/no-unassigned-import
+import "chrome://browser/content/aiwindow/components/ai-website-chip.mjs";
 
 const SCHEDULE_TYPES = Object.freeze({
   DAILY: "daily",
@@ -24,7 +26,10 @@ const SCHEDULE_TYPES = Object.freeze({
 
 const SCHEDULE_ICON = "chrome://browser/skin/calendar-24.svg";
 const TIME_ICON = "chrome://browser/skin/history-20.svg";
-const MAX_WATCH_URLS = 5;
+const DEFAULT_MAX_WATCH_URLS = 5;
+
+// How long to coalesce typing before mirroring the form to the host
+const DRAFT_PERSIST_DELAY_MS = 250;
 
 // Check times offered by the create card in 30-minute increments
 const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
@@ -47,6 +52,26 @@ const TIME_OPTIONS = Array.from({ length: 48 }, (_, i) => {
     label,
   };
 });
+
+/**
+ * Rounds the user's local time up to the nearest TIME_OPTIONS slot, giving the
+ * time input a more useful default than always starting at 9:00. Seconds are
+ * ignored, so 2:00:10 PM still yields 2:00 PM while 2:01 PM yields 2:30 PM.
+ *
+ * @param {Date} [now] - The time to round up from
+ * @returns {string} An "HH:MM" value matching one of TIME_OPTIONS
+ */
+function nextTimeOption(now = new Date()) {
+  const minutesSinceMidnight = now.getHours() * 60 + now.getMinutes();
+  const slot = Math.ceil(minutesSinceMidnight / 30);
+
+  // Wrap past the final 11:30 PM option back to midnight.
+  if (slot >= TIME_OPTIONS.length) {
+    return TIME_OPTIONS[0].value;
+  }
+
+  return TIME_OPTIONS[slot].value;
+}
 
 // Indexed by the weekday values used by the scheduler (0 = Sunday)
 const WEEKDAYS = [
@@ -76,17 +101,21 @@ const WEEKDAYS = [
  *  - agent-monitor-item:toggle       detail: { expanded }
  *  - agent-monitor-item:edit-toggle  detail: { editing }
  *  - agent-monitor-item:submit       detail: { mode, id, monitorName, condition, watchUrls, schedule }
+ *  - agent-monitor-item:draft-change detail: { draft: MonitorDraft|null }
  *  - agent-monitor-item:cancel
  *  - agent-monitor-item:delete       detail: { id }
  *  - agent-monitor-item:pause        detail: { id, paused }
  *  - agent-monitor-item:check-now    detail: { id }
- *  - agent-monitor-item:open         detail: { id, url }
  *
  * @property {Agent} agent - Monitor data:
  *  {
  *    id: string,
  *    monitorName: string,
  *    url: string,
+ *    watchUrls?: string[],
+ *    watchUrlTitles?: Record<string, string>, // url -> page title, resolved by
+ *                               // the host from Places; chips fall back to the
+ *                               // hostname for URLs
  *    faviconText?: string,      // 1-2 char fallback favicon glyph
  *    faviconColor?: string,     // fallback favicon background
  *    value?: string,            // current value, e.g. "$278"
@@ -98,18 +127,33 @@ const WEEKDAYS = [
  *    history?: Array<{ when: string, oldValue?: string, newValue?: string,
  *                      note?: string, flag?: string, low?: boolean }>,
  *  }
+ * @property {?MonitorDraft} draft - In-progress form state to restore over the
+ *  values seeded from 'agent'. The card only renders it, the host owns it:
+ *  every edit is mirrored back out via 'agent-monitor-item:draft-change' so an
+ *  unsubmitted form survives the card being torn down and rebuilt.
+ *  {
+ *    editing?: boolean,        // reopen the edit form the draft belongs to
+ *    monitorName?: string,
+ *    condition?: string,
+ *    watchUrls?: string[],
+ *    pendingUrl?: string,
+ *    schedule?: { frequency: string, time: string, weekday: number },
+ *  }
  * @property {"display"|"create"} mode - Which card layout to render
  * @property {boolean} expanded - Whether the display card is expanded
  * @property {boolean} editing - Whether the editable condition field is shown
  * @property {boolean} showLastResult - Whether to show the last check result chip (defaults to false)
+ * @property {number} maxWatchUrls - How many pages one monitor may watch
  */
 export class AgentMonitorItem extends MozLitElement {
   static properties = {
     agent: { type: Object },
+    draft: { type: Object },
     mode: { type: String, reflect: true },
     expanded: { type: Boolean, reflect: true },
     editing: { type: Boolean, reflect: true },
     showLastResult: { type: Boolean },
+    maxWatchUrls: { type: Number },
     checkFrequency: { type: String, state: true },
     scheduleTime: { type: String, state: true },
     scheduleWeekday: { type: Number, state: true },
@@ -122,12 +166,14 @@ export class AgentMonitorItem extends MozLitElement {
   constructor() {
     super();
     this.agent = {};
+    this.draft = null;
     this.mode = "display";
     this.expanded = false;
     this.editing = false;
     this.showLastResult = false;
+    this.maxWatchUrls = DEFAULT_MAX_WATCH_URLS;
     this.checkFrequency = SCHEDULE_TYPES.DAILY;
-    this.scheduleTime = "09:00";
+    this.scheduleTime = nextTimeOption();
     this.scheduleWeekday = 1;
     this.alertDescription = "";
     this.pageUrls = [];
@@ -137,38 +183,145 @@ export class AgentMonitorItem extends MozLitElement {
   }
 
   #draftName;
+  #draftPersistTimer = null;
 
   willUpdate(changed) {
     if (changed.has("agent")) {
-      this.#draftName = null;
+      this.#seedFromAgent();
+    }
 
-      const { watchUrls, url, condition, expanded } = this.agent ?? {};
-      let seededUrls = [];
-      if (watchUrls?.length) {
-        seededUrls = watchUrls;
-      } else if (url) {
-        seededUrls = [url];
-      }
-      this.pageUrls = seededUrls.filter(u => u?.trim().length);
-      this.alertDescription = condition ?? "";
-      this.pendingUrl = "";
-      this.pendingUrlError = "";
+    if (changed.has("agent") || changed.has("draft")) {
+      this.#applyDraft();
+    }
+  }
 
-      // If the agent data includes an expanded state, apply it
-      if (expanded !== undefined) {
-        this.expanded = expanded;
-      }
+  disconnectedCallback() {
+    if (this.#draftPersistTimer) {
+      this.#flushDraft();
+    }
+    super.disconnectedCallback();
+  }
 
-      // Seed the schedule fields from an existing monitor so edit mode reflects
-      // its current scheduled
-      const schedule = this.agent?.schedule;
-      if (schedule) {
-        this.checkFrequency = schedule.frequency ?? this.checkFrequency;
-        this.scheduleTime = schedule.time ?? this.scheduleTime;
-        this.scheduleWeekday = schedule.weekday
-          ? Number(schedule.weekday)
-          : this.scheduleWeekday;
-      }
+  #seedFromAgent() {
+    this.#draftName = null;
+
+    const { watchUrls, url, condition, expanded } = this.agent ?? {};
+    let seededUrls = [];
+    if (watchUrls?.length) {
+      seededUrls = watchUrls;
+    } else if (url) {
+      seededUrls = [url];
+    }
+    this.pageUrls = seededUrls.filter(u => u?.trim().length);
+    this.alertDescription = condition ?? "";
+    this.pendingUrl = "";
+    this.pendingUrlError = "";
+
+    // If the agent data includes an expanded state, apply it
+    if (expanded !== undefined) {
+      this.expanded = expanded;
+    }
+
+    // Seed the schedule fields from an existing monitor so edit mode reflects
+    // its current scheduled
+    const schedule = this.agent?.schedule;
+    if (schedule) {
+      this.checkFrequency = schedule.frequency ?? this.checkFrequency;
+      this.scheduleTime = schedule.time ?? this.scheduleTime;
+      this.scheduleWeekday = schedule.weekday
+        ? Number(schedule.weekday)
+        : this.scheduleWeekday;
+    }
+  }
+
+  /**
+   * Restores an unsubmitted form over the values seeded from 'agent'.
+   */
+  #applyDraft() {
+    if (!this.draft) {
+      return;
+    }
+    const { editing, monitorName, condition, watchUrls, pendingUrl, schedule } =
+      this.draft;
+
+    // A draft only outlives the card while an edit is unsubmitted, so reopen
+    // the form the user was in the middle of. The edit affordances live in the
+    // expanded body, so the card has to come back expanded to show them.
+    if (editing) {
+      this.editing = true;
+      this.expanded = true;
+    }
+    if (monitorName !== undefined) {
+      this.#draftName = monitorName;
+    }
+    if (condition !== undefined) {
+      this.alertDescription = condition;
+    }
+    if (watchUrls) {
+      this.pageUrls = [...watchUrls];
+    }
+    if (pendingUrl !== undefined) {
+      this.pendingUrl = pendingUrl;
+    }
+    if (schedule?.frequency) {
+      this.checkFrequency = schedule.frequency;
+    }
+    if (schedule?.time) {
+      this.scheduleTime = schedule.time;
+    }
+    if (schedule?.weekday !== undefined) {
+      this.scheduleWeekday = Number(schedule.weekday);
+    }
+  }
+
+  /**
+   * Mirrors the in-progress form out to the host.
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.debounce] - Coalesce rapid edits, for typing
+   */
+  #persistDraft({ debounce = false } = {}) {
+    if (this.mode !== "create" && !this.editing) {
+      return;
+    }
+    this.#clearDraftTimer();
+    if (!debounce) {
+      this.#flushDraft();
+      return;
+    }
+    this.#draftPersistTimer = setTimeout(
+      () => this.#flushDraft(),
+      DRAFT_PERSIST_DELAY_MS
+    );
+  }
+
+  #flushDraft() {
+    this.#clearDraftTimer();
+    this.#dispatch("agent-monitor-item:draft-change", {
+      draft: {
+        editing: this.editing,
+        monitorName: this.#monitorName,
+        condition: this.alertDescription,
+        watchUrls: [...this.pageUrls],
+        pendingUrl: this.pendingUrl,
+        schedule: {
+          frequency: this.checkFrequency,
+          time: this.scheduleTime,
+          weekday: this.scheduleWeekday,
+        },
+      },
+    });
+  }
+
+  #discardDraft() {
+    this.#clearDraftTimer();
+    this.#dispatch("agent-monitor-item:draft-change", { draft: null });
+  }
+
+  #clearDraftTimer() {
+    if (this.#draftPersistTimer) {
+      clearTimeout(this.#draftPersistTimer);
+      this.#draftPersistTimer = null;
     }
   }
 
@@ -190,6 +343,8 @@ export class AgentMonitorItem extends MozLitElement {
 
   #onNameInput(event) {
     this.#draftName = event.target.value;
+    // Typing coalesces, a change (blur) flushes right away
+    this.#persistDraft({ debounce: event.type === "input" });
   }
 
   #onCardClick(e) {
@@ -206,15 +361,24 @@ export class AgentMonitorItem extends MozLitElement {
 
   #onEditToggle() {
     this.editing = !this.editing;
+    // Opening the form is itself worth remembering, so an edit session that
+    // hasn't been typed in yet survives too. Leaving discards the edit.
+    if (this.editing) {
+      this.#persistDraft();
+    } else {
+      this.#discardDraft();
+    }
     this.#dispatch("agent-monitor-item:edit-toggle", { editing: this.editing });
   }
 
   #onConditionInput(event) {
     this.alertDescription = event.target.value;
+    this.#persistDraft({ debounce: event.type === "input" });
   }
 
   #onPresetClick(preset) {
     this.alertDescription = preset;
+    this.#persistDraft();
   }
 
   // TODO: Bug 2054529 - share this URL validation with about:tools' create form
@@ -262,20 +426,22 @@ export class AgentMonitorItem extends MozLitElement {
       );
       return;
     }
-    if (this.pageUrls.length >= MAX_WATCH_URLS) {
+    if (this.pageUrls.length >= this.maxWatchUrls) {
       this.pendingUrlError = await document.l10n.formatValue(
         "ai-tasks-alert-error-max-urls",
-        { count: MAX_WATCH_URLS }
+        { maxUrls: this.maxWatchUrls }
       );
       return;
     }
     this.pageUrls = [...this.pageUrls, url];
     this.pendingUrl = "";
     this.pendingUrlError = "";
+    this.#persistDraft();
   }
 
   #removeUrl(url) {
     this.pageUrls = this.pageUrls.filter(u => u !== url);
+    this.#persistDraft();
   }
 
   #displayUrl(url) {
@@ -289,6 +455,7 @@ export class AgentMonitorItem extends MozLitElement {
   #onPendingUrlInput(event) {
     this.pendingUrl = event.target.value;
     this.#validatePendingUrl();
+    this.#persistDraft({ debounce: true });
   }
 
   #onPendingUrlKeydown(event) {
@@ -299,10 +466,20 @@ export class AgentMonitorItem extends MozLitElement {
     this.#addUrl();
   }
 
+  #onCancel() {
+    // Cancelling drops the whole card, and with it the draft the host holds,
+    // so this only has to stop a coalesced edit from landing after that
+    this.#clearDraftTimer();
+    this.#dispatch("agent-monitor-item:cancel", {});
+  }
+
   #onSubmit() {
     if (!this.#isFormValid) {
       return;
     }
+    // The host drops the draft as it commits the form, so make sure a coalesced
+    // edit can't land after that and resurrect it
+    this.#clearDraftTimer();
     const isCreateMode = this.mode === "create";
     this.#dispatch("agent-monitor-item:submit", {
       mode: this.mode,
@@ -403,7 +580,7 @@ export class AgentMonitorItem extends MozLitElement {
               data-l10n-id="ai-tasks-alert-pages"
               data-l10n-attrs="placeholder,label"
               data-l10n-args=${JSON.stringify({
-                maxPages: MAX_WATCH_URLS,
+                maxPages: this.maxWatchUrls,
               })}
               .value=${this.pendingUrl}
               @input=${this.#onPendingUrlInput}
@@ -417,7 +594,6 @@ export class AgentMonitorItem extends MozLitElement {
               iconsrc="chrome://global/skin/icons/plus.svg"
               data-l10n-id="ai-tasks-alert-add-url"
               data-l10n-attrs="aria-label"
-              ?disabled=${this.pageUrls.length >= MAX_WATCH_URLS}
               @click=${() => this.#addUrl()}
             ></moz-button>
           </div>
@@ -559,14 +735,17 @@ export class AgentMonitorItem extends MozLitElement {
 
   #onFrequencyChange(event) {
     this.checkFrequency = event.target.value;
+    this.#persistDraft();
   }
 
   #onScheduleTimeChange(event) {
     this.scheduleTime = event.target.value;
+    this.#persistDraft();
   }
 
   #onWeekdayChange(event) {
     this.scheduleWeekday = Number(event.target.value);
+    this.#persistDraft();
   }
 
   #renderScheduleSummary() {
@@ -711,6 +890,7 @@ export class AgentMonitorItem extends MozLitElement {
               data-l10n-id="ai-tasks-alert-name"
               data-l10n-attrs="label"
               .value=${this.#monitorName}
+              @input=${this.#onNameInput}
               @change=${this.#onNameInput}
             ></moz-input-text>
           </div>
@@ -729,15 +909,17 @@ export class AgentMonitorItem extends MozLitElement {
         <div class="monitor-card-actions">
           <span class="spacer"></span>
           <moz-button
+            id="cancel-create-button"
             type="default"
             data-l10n-id="ai-tasks-alert-cancel-button"
             data-l10n-attrs="label"
-            @click=${() => this.#dispatch("agent-monitor-item:cancel", {})}
+            @click=${this.#onCancel}
           ></moz-button>
           <moz-button
             type="primary"
             data-l10n-id="ai-tasks-alert-create-button"
             data-l10n-attrs="label"
+            ?disabled=${!this.#isFormValid}
             @click=${this.#onSubmit}
           ></moz-button>
         </div>
@@ -750,20 +932,25 @@ export class AgentMonitorItem extends MozLitElement {
     return html`
       <div class="monitor-card chatcard" @click=${this.#onCardClick}>
         <div class="monitor-card-head">
-          ${this.#renderStatusChip()}
-          <span class="monitor-card-title"
-            ><span class="monitor-card-name">${agent.monitorName}</span></span
-          >
-          <span class="spacer"></span>
-          ${this.showLastResult ? this.#renderLastCheckedCondition() : nothing}
-          <button
-            type="button"
-            class="chev"
-            aria-expanded=${this.expanded}
-            data-l10n-id="ai-tasks-alert-show-details"
-            data-l10n-attrs="aria-label"
-            @click=${this.#onToggle}
-          ></button>
+          <div class="monitor-card-head-left">
+            ${this.#renderStatusChip()}
+            <span class="monitor-card-title"
+              ><span class="monitor-card-name">${agent.monitorName}</span></span
+            >
+          </div>
+          <div class="monitor-card-head-right">
+            ${this.showLastResult
+              ? this.#renderLastCheckedCondition()
+              : nothing}
+            <button
+              type="button"
+              class="chev"
+              aria-expanded=${this.expanded}
+              data-l10n-id="ai-tasks-alert-show-details"
+              data-l10n-attrs="aria-label"
+              @click=${this.#onToggle}
+            ></button>
+          </div>
         </div>
         ${this.expanded ? this.#renderExpand() : nothing}
       </div>
@@ -801,9 +988,15 @@ export class AgentMonitorItem extends MozLitElement {
                     <div class="url-chips">
                       ${agent.watchUrls.map(
                         url =>
-                          html`<span class="url-chip"
-                            >${this.#displayUrl(url)}</span
-                          >`
+                          html`<ai-website-chip
+                            type="context-chip"
+                            size="small"
+                            label=${agent.watchUrlTitles?.[url] ??
+                            this.#displayUrl(url)}
+                            .iconSrc=${`page-icon:${url}`}
+                            title=${url}
+                            .href=${url}
+                          ></ai-website-chip>`
                       )}
                     </div>
                   </div>`
@@ -814,6 +1007,7 @@ export class AgentMonitorItem extends MozLitElement {
         <div class="monitor-card-actions">
           ${!this.editing
             ? html`<moz-button
+                  id="edit-button"
                   type="default"
                   @click=${this.#onEditToggle}
                   data-l10n-id="ai-tasks-alert-edit-button"
@@ -847,6 +1041,7 @@ export class AgentMonitorItem extends MozLitElement {
           <span class="spacer"></span>
           ${this.editing
             ? html` <moz-button
+                  id="cancel-edit-button"
                   type="secondary"
                   @click=${this.#onEditToggle}
                   data-l10n-id="ai-tasks-alert-cancel-button"

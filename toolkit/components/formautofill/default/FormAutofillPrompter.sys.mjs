@@ -1252,7 +1252,7 @@ CONTENT = {
           callbackState: "cancel",
         },
         {
-          l10nId: "address-capture-never-save-button",
+          l10nId: "address-capture-never-save-addresses-button",
           callbackState: "disable",
         },
       ],
@@ -1720,7 +1720,7 @@ export let FormAutofillPrompter = {
     } else {
       changedGUID = await storage.add(newRecord);
     }
-    storage.notifyUsed(changedGUID);
+    await storage.notifyUsed(changedGUID);
 
     showConfirmation(
       browser,

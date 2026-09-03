@@ -155,11 +155,6 @@ Valgrind tasks produce builds instrumented by valgrind.
 
 Searchfox builds generate C++ index data for Searchfox.
 
-## static-analysis-autotest
-
-Static analysis autotest utility in order to be sure that there is no regression
-when upgrading utilities that impact static-analysis.
-
 ## toolchain
 
 Toolchain builds create the compiler toolchains used to build Firefox. These
@@ -937,6 +932,10 @@ Generate instrumented apks used to generate Baseline Profile for Android apps.
 ## generate-baseline-profile-firebase
 
 Run baseline profile generation for Android on Firebase TestLab.
+
+## dte-test
+
+Send payload for DTE testing Github Actions.
 
 ## update-test
 

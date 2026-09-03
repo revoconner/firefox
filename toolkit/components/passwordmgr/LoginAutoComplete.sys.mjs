@@ -7,7 +7,7 @@
  */
 
 import { XPCOMUtils } from "resource://gre/modules/XPCOMUtils.sys.mjs";
-import { GenericAutocompleteItem } from "resource://gre/modules/FillHelpers.sys.mjs";
+import { adaptExternalAutocompleteItem } from "resource://gre/modules/FillHelpers.sys.mjs";
 
 const lazy = {};
 
@@ -33,6 +33,17 @@ ChromeUtils.defineLazyGetter(lazy, "dateAndTimeFormatter", () => {
     dateStyle: "medium",
   });
 });
+ChromeUtils.defineLazyGetter(
+  lazy,
+  "l10n",
+  () => new Localization(["toolkit/main-window/autocomplete.ftl"], true)
+);
+XPCOMUtils.defineLazyPreferenceGetter(
+  lazy,
+  "removeRecordsEnabled",
+  "browser.autocomplete.removeRecords.enabled",
+  false
+);
 
 function loginSort(formHostPort, a, b) {
   let maybeHostPortA = lazy.LoginHelper.maybeGetHostPortForURL(a.origin);
@@ -156,12 +167,30 @@ class LoginAutocompleteItem extends AutocompleteItem {
         isOriginMatched && login.httpRealm === null
           ? getLocalizedString("displaySameOrigin")
           : login.displayOrigin,
-      secondaryAction: {
-        type: "edit",
-        label: getLocalizedString("autocompleteEditLogin"),
-        fillMessageName: "PasswordManager:OpenPreferences",
-        fillMessageData: { loginGuid: login.guid, entryPoint: "Autocomplete" },
-      },
+      secondaryAction: lazy.removeRecordsEnabled
+        ? {
+            type: "menupopup",
+            label: lazy.l10n.formatValueSync("autocomplete-more-actions"),
+            actions: [
+              {
+                label: lazy.l10n.formatValueSync("autocomplete-edit-password"),
+              },
+              {
+                label: lazy.l10n.formatValueSync(
+                  "autocomplete-delete-password"
+                ),
+              },
+            ],
+          }
+        : {
+            type: "edit",
+            label: getLocalizedString("autocompleteEditLogin"),
+            fillMessageName: "PasswordManager:OpenPreferences",
+            fillMessageData: {
+              loginGuid: login.guid,
+              entryPoint: "Autocomplete",
+            },
+          },
     });
     this.image = `page-icon:${login.origin}`;
   }
@@ -371,16 +400,7 @@ export class LoginAutoCompleteResult {
     if (isFooterEnabled()) {
       if (autocompleteItems) {
         this.#rows.push(
-          ...autocompleteItems.map(
-            item =>
-              new GenericAutocompleteItem(
-                item.image,
-                item.label,
-                item.secondary,
-                item.fillMessageName,
-                item.fillMessageData
-              )
-          )
+          ...autocompleteItems.map(adaptExternalAutocompleteItem)
         );
       }
 

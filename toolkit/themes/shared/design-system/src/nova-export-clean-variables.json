@@ -437,7 +437,7 @@
         "primary": {
           "Light": "{color/violet/50}",
           "Dark": "{color/violet/30}",
-          "HCM": "{Highlight}",
+          "HCM": "{ButtonText}",
           "Private": "{color/violet/30}",
           "deemphasized": {
             "Light": "rgba(117, 41, 232, 0.10000000149011612)",
@@ -684,7 +684,7 @@
           "selected": {
             "Light": "{button/background/color/active}",
             "Dark": "{button/background/color/active}",
-            "HCM": "{button/background/color/active}",
+            "HCM": "{SelectedItem}",
             "Private": "{button/background/color/active}",
             "Smart Light (WIP)": "{button/background/color/active}"
           },
@@ -1213,7 +1213,7 @@
             "disabled": {
               "Light": "{button/text/color/ghost/disabled}",
               "Dark": "{button/text/color/disabled}",
-              "HCM": "{button/text/color/primary/disabled}",
+              "HCM": "{button/text/color/disabled}",
               "Private": "{button/text/color/disabled}",
               "Smart Light (WIP)": "{button/text/color/ghost/disabled}"
             },
@@ -1260,6 +1260,19 @@
               "HCM": "{button/text/color/ghost/active}",
               "Private": "{button/text/color/ghost/active}",
               "Smart Light (WIP)": "{button/text/color/muted/active}"
+            }
+          }
+        }
+      },
+      "split": {
+        "separator": {
+          "background": {
+            "color": {
+              "Light": "{button/border/color}",
+              "Dark": "{button/border/color}",
+              "HCM": "{button/border/color}",
+              "Private": "{button/border/color}",
+              "Smart Light (WIP)": "{button/border/color}"
             }
           }
         }
@@ -1374,6 +1387,19 @@
           "Smart Light (WIP)": "{color/red/40}"
         },
         "Smart Light (WIP)": "{color/gray/50}"
+      }
+    },
+    "input": {
+      "text": {
+        "background": {
+          "color": {
+            "Light": "{background/color/box}",
+            "Dark": "{background/color/box}",
+            "disabled": {
+              "Value": "{button/background/color/ghost/disabled}"
+            }
+          }
+        }
       }
     },
     "link": {
@@ -3065,7 +3091,12 @@
             "HCM": "{border/color/interactive/disabled}",
             "Private": "{border/color/interactive/disabled}",
             "Smart Light (WIP)": "{border/color/interactive/disabled}"
-          }
+          },
+          "Light": "{border/color/interactive}",
+          "Dark": "{border/color/interactive}",
+          "HCM": "{border/color/interactive}",
+          "Private": "{border/color/interactive}",
+          "Smart Light (WIP)": "{border/color/interactive}"
         }
       }
     },
@@ -3914,7 +3945,10 @@
           "Value": "{border/radius/xlarge}"
         },
         "width": {
-          "Value": "{border/width}"
+          "Value": "{border/width}",
+          "split": {
+            "Value": 0
+          }
         }
       },
       "min-height": {
@@ -3930,7 +3964,7 @@
         "icon": {
           "Value": "{button/min-height}",
           "small": {
-            "Value": "{size/item/medium}"
+            "Value": "{button/min-height/small}"
           },
           "lage": {
             "Value": "{size/item/large}"
@@ -3950,6 +3984,11 @@
         "block": {
           "Value": "{space/xsmall}"
         }
+      },
+      "gap": {
+        "split": {
+          "Value": 0
+        }
       }
     },
     "checkbox": {
@@ -3968,6 +4007,13 @@
       }
     },
     "input": {
+      "search": {
+        "icon": {
+          "size": {
+            "Value": "{icon/size/small}"
+          }
+        }
+      },
       "text": {
         "min": {
           "height": {
@@ -4035,21 +4081,21 @@
       },
       "padding": {
         "inner": {
-          "narrow": {
-            "Value": 7
-          },
           "Value": 8,
           "touch": {
             "narrow": {
               "Value": 8
             }
+          },
+          "narrow": {
+            "Value": 7
           }
         },
         "outer": {
+          "Value": 2,
           "narrow": {
             "Value": 1
-          },
-          "Value": 2
+          }
         },
         "compact": {
           "inner": {
@@ -4151,13 +4197,6 @@
           }
         }
       },
-      "text-container": {
-        "padding": {
-          "block": {
-            "Value": 0
-          }
-        }
-      },
       "icon": {
         "size": {
           "Value": "{icon/size}"
@@ -4169,6 +4208,13 @@
       "margin": {
         "block": {
           "start": {
+            "Value": 0
+          }
+        }
+      },
+      "text-container": {
+        "padding": {
+          "block": {
             "Value": 0
           }
         }

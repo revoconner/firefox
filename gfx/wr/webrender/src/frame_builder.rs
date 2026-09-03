@@ -17,7 +17,7 @@ use crate::gpu_types::{PrimitiveHeaders, ZBufferIdGenerator};
 use crate::gpu_types::QuadSegment;
 use crate::internal_types::{FastHashMap, PlaneSplitter, FrameStamp};
 use crate::invalidation::DirtyRegion;
-use crate::tile_cache::{SliceId, TileCacheInstance};
+use crate::tile_cache::{max_surface_size_for_screen, SliceId, TileCacheInstance};
 use crate::picture::PictureInstance;
 use crate::picture::ResolvedSurfaceTexture;
 use crate::picture::{RasterConfig, PictureScratch};
@@ -114,6 +114,23 @@ pub struct FrameBuildingContext<'a> {
     pub debug_flags: DebugFlags,
     pub fb_config: &'a FrameBuilderConfig,
     pub root_spatial_node_index: SpatialNodeIndex,
+}
+
+impl<'a> FrameBuildingContext<'a> {
+    /// The maximum size per axis, in device pixels, of a surface allocated
+    /// during this frame. Surfaces larger than this are scaled down to fit.
+    pub fn max_surface_size(&self) -> usize {
+        // Tests pin the limit so they can exercise the scale-down path at a
+        // size that fits in a reftest window.
+        if let Some(size) = self.fb_config.max_surface_override {
+            return size;
+        }
+
+        max_surface_size_for_screen(
+            self.global_screen_device_rect.size().round().to_i32(),
+            self.fb_config.max_target_size,
+        )
+    }
 }
 
 pub struct FrameBuildingState<'a> {
@@ -313,6 +330,7 @@ impl FrameBuilder {
             DeviceRect::max_rect(),
             &frame_context.spatial_tree,
             euclid::Scale::new(1.0),
+            (1.0, 1.0),
             (1.0, 1.0),
             (1.0, 1.0),
             false,
@@ -1203,6 +1221,7 @@ pub fn build_render_pass(
                                 transforms,
                                 pic_task.raster_spatial_node_index,
                                 pic_task.surface_spatial_node_index,
+                                pic_task.device_pixel_scale,
                                 z_generator,
                                 prim_instances,
                                 gpu_buffer_builder,

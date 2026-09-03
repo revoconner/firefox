@@ -16,6 +16,8 @@ ChromeUtils.defineESModuleGetters(this, {
     "moz-src:///browser/components/aiwindow/ui/modules/AIWindow.sys.mjs",
   BrowserUtils: "resource://gre/modules/BrowserUtils.sys.mjs",
   BrowserWindowTracker: "resource:///modules/BrowserWindowTracker.sys.mjs",
+  ContainerCreationPanel:
+    "chrome://browser/content/usercontext/ContainerCreationPanel.mjs",
   ContextualIdentityService:
     "moz-src:///toolkit/components/contextualidentity/ContextualIdentityService.sys.mjs",
   ExtensionSettingsStore:
@@ -185,6 +187,7 @@ function createUserContextMenu(
     useAccessKeys = true,
     showAddContainer = true,
     showManageContainers = true,
+    containerSource = "unknown",
   } = {}
 ) {
   while (event.target.hasChildNodes()) {
@@ -208,6 +211,7 @@ function createUserContextMenu(
     menuitem.setAttribute("data-usercontextid", "0");
     if (!isContextMenu) {
       menuitem.setAttribute("command", "Browser:NewUserContextTab");
+      menuitem.setAttribute("data-container-entrypoint", containerSource);
     }
 
     docfrag.appendChild(menuitem);
@@ -239,6 +243,7 @@ function createUserContextMenu(
 
     if (!isContextMenu) {
       menuitem.setAttribute("command", "Browser:NewUserContextTab");
+      menuitem.setAttribute("data-container-entrypoint", containerSource);
     }
 
     menuitem.classList.add("identity-icon-" + identity.icon);
@@ -260,7 +265,10 @@ function createUserContextMenu(
       );
       menuitem.setAttribute("label", label);
     }
-    menuitem.setAttribute("command", "Browser:AddContainer");
+    menuitem.addEventListener("command", commandEvent => {
+      commandEvent.stopPropagation();
+      ContainerCreationPanel.open(window, containerSource);
+    });
     docfrag.appendChild(menuitem);
   }
 
@@ -274,7 +282,12 @@ function createUserContextMenu(
       );
       menuitem.setAttribute("label", label);
     }
-    menuitem.setAttribute("command", "Browser:OpenAboutContainers");
+    menuitem.addEventListener("command", commandEvent => {
+      commandEvent.stopPropagation();
+      openPreferences("paneContainers", {
+        urlParams: { entrypoint: containerSource },
+      });
+    });
     docfrag.appendChild(menuitem);
   }
 
@@ -397,7 +410,7 @@ function openAboutDialog() {
 }
 
 function openReferralsPage() {
-  Referrals.openReferralsTab(window);
+  Referrals.openReferralsTab(window, "help_menu");
 }
 
 async function openPreferences(paneID, extraArgs) {

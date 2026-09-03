@@ -38,6 +38,23 @@ var { DEVICE_TYPE_MOBILE, DEVICE_TYPE_TABLET } = ChromeUtils.importESModule(
 
 const MIN_STATUS_ANIMATION_DURATION = 1600;
 
+// Campaign params shared by every product CTA in the Mozilla account toolbar
+// panel. The per-variant utm_content is added by gSync._ctaURL.
+const FXA_CTA_UTM_PARAMS = {
+  utm_medium: "referral",
+  utm_source: "firefox-desktop",
+  utm_campaign: "toolbar",
+};
+
+// Locales are intentionally omitted: all three sites redirect to the visitor's
+// locale, and hardcoding one would send non-English users to English pages.
+const MONITOR_NEW_USER_URL = "https://monitor.mozilla.org/";
+const MONITOR_EXISTING_USER_URL = "https://monitor.mozilla.org/user/dashboard/";
+const RELAY_NEW_USER_URL = "https://relay.firefox.com/";
+const RELAY_EXISTING_USER_URL = "https://relay.firefox.com/accounts/profile/";
+const VPN_NEW_USER_URL = "https://www.mozilla.org/products/vpn/";
+const VPN_EXISTING_USER_URL = "https://www.mozilla.org/products/vpn/download/";
+
 this.SyncedTabsPanelList = class SyncedTabsPanelList {
   static sRemoteTabsDeckIndices = {
     DECKINDEX_TABS: 0,
@@ -607,6 +624,8 @@ this.FxAMenuDeviceList = class FxAMenuDeviceList {
    * device is still appended so the list never shows fewer devices than the
    * tabs engine knows about (e.g. when the cached device list is stale or not
    * yet fetched).
+   *
+   * The current device gets excluded.
    */
   async _getMergedDeviceList() {
     let clients = await SyncedTabs.getTabClients();
@@ -628,12 +647,16 @@ this.FxAMenuDeviceList = class FxAMenuDeviceList {
     let merged = [];
     let matchedClients = new Set();
     for (let device of devices) {
+      let client = clientByFxaId.get(device.id);
+      if (client) {
+        // Record the client even when the device is skipped below, so the pass
+        // over unmatched clients doesn't add it back.
+        matchedClients.add(client);
+      }
       if (device.isCurrentDevice) {
         continue;
       }
-      let client = clientByFxaId.get(device.id);
       if (client) {
-        matchedClients.add(client);
         merged.push(client);
       } else if (fxAccounts.commands.sendTab.isDeviceCompatible(device)) {
         merged.push({
@@ -690,6 +713,13 @@ this.FxAMenuDeviceList = class FxAMenuDeviceList {
     return "desktop";
   }
 
+  _getTelemetryDeviceType(device) {
+    const isMobile =
+      device?.type === DEVICE_TYPE_MOBILE ||
+      device?.type === DEVICE_TYPE_TABLET;
+    return isMobile ? "mobile" : "desktop";
+  }
+
   _createDeviceEntry(client, device) {
     let btn = document.createXULElement("toolbarbutton");
     btn.classList.add(
@@ -713,12 +743,14 @@ this.FxAMenuDeviceList = class FxAMenuDeviceList {
       // was created (e.g. on the first menu open after signing in). Resolving
       // it now ensures the "Send Current Page to This Device" button is shown
       // when the device is sendTab-capable, instead of only on a later open.
-      this._showDeviceRecentTabs(
-        client,
-        this._getDeviceForClient(client) ?? device,
-        btn,
-        e
-      );
+      const resolvedDevice = this._getDeviceForClient(client) ?? device;
+
+      gSync.emitFxaToolbarTelemetry("synced_device_submenu", btn, {
+        device_type: this._getTelemetryDeviceType(resolvedDevice),
+        device_count: String(gSync.getSendTabTargets().length),
+      });
+
+      this._showDeviceRecentTabs(client, resolvedDevice, btn, e);
     });
     return btn;
   }
@@ -1069,6 +1101,16 @@ var gSync = {
   // Track whether send tab exposure events have been recorded for current context menu session
   _sendTabExposureRecorded: new Set(),
 
+  // FxA menu telemetry types that already name their Glean metric in full.
+  // Every other type names only the `<object>` half of a legacy
+  // `fxa_*_menu.click#<object>` event and gets a `click` prefix added.
+  // See emitFxaToolbarTelemetry.
+  NONPREFIXED_EVENT_TYPES: new Set([
+    "send_tab_exposed",
+    "send_tab_opened",
+    "synced_device_submenu",
+  ]),
+
   get log() {
     if (!this._log) {
       const { Log } = ChromeUtils.importESModule(
@@ -1203,6 +1245,16 @@ var gSync = {
       }
     }
     return targets.sort((a, b) => b.lastAccessTime - a.lastAccessTime);
+  },
+
+  // Returns the clientType attribute value used for device icons for a send
+  // tab to device target, preferring the Sync client record when available.
+  getTargetClientType(target) {
+    if (target.clientRecord) {
+      return Weave.Service.clientsEngine.getClientType(target.clientRecord.id);
+    }
+    // For phones, FxA uses "mobile" and Sync clients uses "phone".
+    return target.type == "mobile" ? "phone" : target.type;
   },
 
   hasOnlyMobileSendTabTargets(targets = this.getSendTabTargets()) {
@@ -1366,9 +1418,12 @@ var gSync = {
     PanelMultiView.getViewNode(
       document,
       "PanelUI-fxa-menu-sync-status-off-button"
-    ).addEventListener("click", e =>
-      this.openPrefsFromFxaMenu("sync_settings", e.currentTarget)
-    );
+    ).addEventListener("click", e => {
+      // We can't use the onCommand handler as we need to be able to pass in
+      // the event currentTarget.
+      this.openPrefsFromFxaMenu("sync_settings", e.currentTarget);
+      CustomizableUI.hidePanelForNode(e.currentTarget);
+    });
     PanelMultiView.getViewNode(
       document,
       "PanelUI-fxa-menu-secure-sync-subpanel"
@@ -1478,9 +1533,30 @@ var gSync = {
     );
     signOutButtonEl.hidden = !this.isSignedIn;
 
-    panelview.syncedTabsPanelList = new FxAMenuDeviceList(
-      PanelMultiView.getViewNode(document, "PanelUI-fxa-menu-devices-list")
+    const devicesListEl = PanelMultiView.getViewNode(
+      document,
+      "PanelUI-fxa-menu-devices-list"
     );
+    const signOutSeparatorEl = PanelMultiView.getViewNode(
+      document,
+      "PanelUI-sign-out-separator"
+    );
+
+    // The FxA panelview is shared between the account (toolbar) menu and the
+    // app (hamburger) menu, so the sign-out button's position is set per show.
+    // In the app menu the sign-out button sits directly below the sync status
+    // section and above the connected devices list, with a separator either
+    // side. In the account menu it stays at the bottom, below the devices list.
+    const inAppMenu = document
+      .getElementById("appMenu-popup")
+      ?.contains(devicesListEl);
+    if (inAppMenu) {
+      signOutButtonEl.after(devicesListEl);
+    } else {
+      signOutSeparatorEl.before(devicesListEl);
+    }
+
+    panelview.syncedTabsPanelList = new FxAMenuDeviceList(devicesListEl);
 
     // Any variant on the CTA will have been applied inside of updateFxAPanel,
     // but now that the panel is showing, we record exposure.
@@ -1498,18 +1574,36 @@ var gSync = {
   },
 
   _showSecureSyncSubpanel(anchor, event) {
-    const deviceName = fxAccounts.device.getLocalName();
+    this._updateSecureSyncNowLabel();
+    PanelUI.showSubView("PanelUI-fxa-menu-secure-sync-subpanel", anchor, event);
+  },
+
+  // Updates the secure sync subpanel's "Sync now" button label. While a sync is
+  // in progress it reads "Syncing…"; otherwise it reads "Sync <device> Now".
+  // The spinning sync icon is shown separately via the "syncstatus" attribute
+  // and CSS, and only when animations are enabled.
+  _updateSecureSyncNowLabel() {
     const labelEl = PanelMultiView.getViewNode(
       document,
       "PanelUI-fxa-menu-secure-sync-now-label"
     );
-    labelEl.setAttribute(
-      "value",
-      this.fluentStrings.formatValueSync("fxa-menu-sync-device-now", {
-        deviceName,
-      })
-    );
-    PanelUI.showSubView("PanelUI-fxa-menu-secure-sync-subpanel", anchor, event);
+    if (!labelEl) {
+      return;
+    }
+    if (this._isCurrentlySyncing) {
+      labelEl.setAttribute(
+        "value",
+        this.fluentStrings.formatValueSync("fxa-toolbar-sync-syncing2")
+      );
+    } else {
+      const deviceName = fxAccounts.device.getLocalName();
+      labelEl.setAttribute(
+        "value",
+        this.fluentStrings.formatValueSync("fxa-menu-sync-device-now", {
+          deviceName,
+        })
+      );
+    }
   },
 
   /**
@@ -1549,6 +1643,10 @@ var gSync = {
       document,
       "PanelUI-fxa-menu-sync-status-off-description"
     );
+    const onButtonEl = PanelMultiView.getViewNode(
+      document,
+      "PanelUI-fxa-menu-sync-status-off-button"
+    );
     const mobileBtn = PanelMultiView.getViewNode(
       document,
       "PanelUI-fxa-menu-get-firefox-mobile"
@@ -1563,14 +1661,21 @@ var gSync = {
 
     offCard.hidden = !syncOffCard;
     if (syncOffCard) {
-      btn.hidden = true;
-      offTitleEl.setAttribute(
-        "value",
-        this.fluentStrings.formatValueSync("fxa-menu-sync-status-off")
+      const offTitle = this.fluentStrings.formatValueSync(
+        "fxa-menu-sync-status-off"
       );
-      offDescEl.setAttribute(
-        "value",
-        this.fluentStrings.formatValueSync("fxa-menu-sync-off-data-description")
+      const offDesc = this.fluentStrings.formatValueSync(
+        "fxa-menu-sync-off-data-description"
+      );
+      const onText = this.fluentStrings.formatValueSync(
+        "fxa-menu-sync-status-turn-on-button-aria-label"
+      );
+      btn.hidden = true;
+      offTitleEl.setAttribute("value", offTitle);
+      offDescEl.setAttribute("value", offDesc);
+      onButtonEl.setAttribute(
+        "aria-label",
+        [offTitle, offDesc, onText].join(", ")
       );
       offCard.after(mobileBtn);
       mobileBtn.hidden = false;
@@ -1632,12 +1737,15 @@ var gSync = {
     const state = UIState.get();
     if (state.status == UIState.STATUS_SIGNED_IN && state.syncEnabled) {
       this._showSecureSyncSubpanel(anchor, event);
-    } else if (state.status == UIState.STATUS_SIGNED_IN) {
-      // Signed in with sync off: open preferences to turn sync on.
-      this.openPrefsFromFxaMenu("sync_settings", anchor);
     } else {
-      // Needs (re-)authentication: open the sign-in page.
-      this.openFxAEmailFirstPageFromFxaMenu(anchor);
+      if (state.status == UIState.STATUS_SIGNED_IN) {
+        // Signed in with sync off: open preferences to turn sync on.
+        this.openPrefsFromFxaMenu("sync_settings", anchor);
+      } else {
+        // Needs (re-)authentication: open the sign-in page.
+        this.openFxAEmailFirstPageFromFxaMenu(anchor);
+      }
+      CustomizableUI.hidePanelForNode(anchor);
     }
   },
 
@@ -2153,7 +2261,6 @@ var gSync = {
     profilesSeparator.remove();
     secureSyncHeader.remove();
 
-    profilesSeparator.hidden = false;
     secureSyncHeader.hidden = false;
 
     anchorEl.after(secureSyncHeader);
@@ -2243,12 +2350,12 @@ var gSync = {
       ...extraOpts,
     };
 
-    // send_tab_exposed -> sendTabExposed, send_tab_opened -> sendTabOpened.
-    // All other types are legacy click events: sync_now -> clickSyncNow,
-    // send_tab -> clickSendTab, etc.
+    // Types listed in NONPREFIXED_EVENT_TYPES map straight to their camelCased
+    // Glean metric (send_tab_opened -> sendTabOpened). Everything else is a
+    // legacy click event and gets the prefix: sync_now -> clickSyncNow.
     const cap = w => w[0].toUpperCase() + w.slice(1);
     const parts = type.split("_");
-    const methodName = type.startsWith("send_tab_")
+    const methodName = gSync.NONPREFIXED_EVENT_TYPES.has(type)
       ? parts[0] + parts.slice(1).map(cap).join("")
       : "click" + parts.map(cap).join("");
 
@@ -2406,7 +2513,10 @@ var gSync = {
     if (!(await FxAccounts.canConnectAccount())) {
       return;
     }
-    const url = await FxAccounts.config.promiseConnectAccountURI(entryPoint);
+    const url = await FxAccounts.config.promiseConnectAccountURI(
+      "sync",
+      entryPoint
+    );
     switchToTabHavingURI(url, true, {
       replaceQueryString: true,
       triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
@@ -2422,7 +2532,10 @@ var gSync = {
   },
 
   async openConnectAnotherDevice(entryPoint) {
-    const url = await FxAccounts.config.promiseConnectDeviceURI(entryPoint);
+    const url = await FxAccounts.config.promiseConnectDeviceURI(
+      "sync",
+      entryPoint
+    );
     openTrustedLinkIn(url, "tab");
   },
 
@@ -2493,6 +2606,7 @@ var gSync = {
       return;
     }
     const url = await FxAccounts.config.promiseConnectAccountURI(
+      "sync",
       entryPoint,
       extraParams
     );
@@ -2757,15 +2871,11 @@ var gSync = {
     }
 
     for (let target of targets) {
-      let type, lastModified;
+      let type = this.getTargetClientType(target);
+      let lastModified;
       if (target.clientRecord) {
-        type = Weave.Service.clientsEngine.getClientType(
-          target.clientRecord.id
-        );
         lastModified = new Date(target.clientRecord.serverLastModified * 1000);
       } else {
-        // For phones, FxA uses "mobile" and Sync clients uses "phone".
-        type = target.type == "mobile" ? "phone" : target.type;
         lastModified = target.lastAccessTime
           ? new Date(target.lastAccessTime)
           : null;
@@ -3207,6 +3317,8 @@ var gSync = {
       .forEach(el => {
         el.setAttribute("syncstatus", "active");
       });
+
+    this._updateSecureSyncNowLabel();
   },
 
   _onActivityStop() {
@@ -3230,6 +3342,8 @@ var gSync = {
       .forEach(el => {
         el.removeAttribute("syncstatus");
       });
+
+    this._updateSecureSyncNowLabel();
 
     Services.obs.notifyObservers(null, "test:browser-sync:activity-stop");
   },
@@ -3458,7 +3572,11 @@ var gSync = {
       this._getEntryPointForElement(sourceElement) === "fxa_app_menu"
         ? "send-tab-app-menu"
         : "send-tab-account-menu";
-    var url = await FxAccounts.config.promiseConnectAccountURI(entryPoint, {});
+    var url = await FxAccounts.config.promiseConnectAccountURI(
+      "sync",
+      entryPoint,
+      {}
+    );
     switchToTabHavingURI(url, true, {});
   },
 
@@ -3466,11 +3584,13 @@ var gSync = {
     openTrustedLinkIn("about:preferences#sync", "tab");
   },
 
-  async openPairDevice(sourceElement) {
-    const entryPoint =
-      this._getEntryPointForElement(sourceElement) === "fxa_app_menu"
-        ? "send-tab-app-menu"
-        : "send-tab-account-menu";
+  async openPairDevice(sourceElement, entryPoint) {
+    if (!entryPoint) {
+      entryPoint =
+        this._getEntryPointForElement(sourceElement) === "fxa_app_menu"
+          ? "send-tab-app-menu"
+          : "send-tab-account-menu";
+    }
     const url = await FxAccounts.config.promisePairingURI({
       entrypoint: entryPoint,
     });
@@ -3770,60 +3890,71 @@ var gSync = {
     }
   },
 
-  async openMonitorLink(sourceElement) {
+  openMonitorLink(sourceElement) {
     this.emitFxaToolbarTelemetry("monitor_cta", sourceElement);
-    await this.openCtaLink(
+    this.openCtaLink(
       FX_MONITOR_OAUTH_CLIENT_ID,
-      new URL("https://monitor.firefox.com"),
-      new URL("https://monitor.firefox.com/user/breaches")
+      this._ctaURL(MONITOR_NEW_USER_URL, "new-user-global"),
+      this._ctaURL(MONITOR_EXISTING_USER_URL, "existing-user-global")
     );
   },
 
-  async openRelayLink(sourceElement) {
+  openRelayLink(sourceElement) {
     this.emitFxaToolbarTelemetry("relay_cta", sourceElement);
-    await this.openCtaLink(
+    this.openCtaLink(
       FX_RELAY_OAUTH_CLIENT_ID,
-      new URL("https://relay.firefox.com"),
-      new URL("https://relay.firefox.com/accounts/profile")
+      this._ctaURL(RELAY_NEW_USER_URL, "new-user-global"),
+      this._ctaURL(RELAY_EXISTING_USER_URL, "existing-user-global")
     );
   },
 
-  async openVPNLink(sourceElement) {
+  openVPNLink(sourceElement) {
     this.emitFxaToolbarTelemetry("vpn_cta", sourceElement);
-    await this.openCtaLink(
+    this.openCtaLink(
       VPN_OAUTH_CLIENT_ID,
-      new URL("https://www.mozilla.org/en-US/products/vpn/"),
-      new URL("https://www.mozilla.org/en-US/products/vpn/")
+      this._ctaURL(VPN_NEW_USER_URL, "new-user-global"),
+      this._ctaURL(VPN_EXISTING_USER_URL, "existing-user-global")
     );
   },
 
   openShareFirefoxLink() {
-    Referrals.openReferralsTab(window);
+    Referrals.openReferralsTab(window, "accounts_menu");
     PanelUI.hide();
   },
 
-  // A generic opening based on
-  async openCtaLink(clientId, defaultUrl, signedInUrl) {
-    const params = {
-      utm_medium: "firefox-desktop",
-      utm_source: "toolbar",
-      utm_campaign: "discovery",
-    };
-    const searchParams = new URLSearchParams(params);
-
-    if (!this.isSignedIn) {
-      // Add the base params + not signed in
-      defaultUrl.search = searchParams.toString();
-      defaultUrl.searchParams.append("utm_content", "notsignedin");
-      this.openLink(defaultUrl);
-      PanelUI.hide();
-      return;
+  /**
+   * Builds a product CTA URL, attaching the shared campaign params plus a
+   * variant-specific utm_content.
+   *
+   * @param {string} baseUrl
+   * @param {string} utmContent
+   *   Identifies which CTA variant the user saw, e.g. "new-user-global".
+   * @returns {URL}
+   */
+  _ctaURL(baseUrl, utmContent) {
+    const url = new URL(baseUrl);
+    for (const [key, value] of Object.entries(FXA_CTA_UTM_PARAMS)) {
+      url.searchParams.set(key, value);
     }
+    url.searchParams.set("utm_content", utmContent);
+    return url;
+  },
 
-    const url = this.hasClientForId(clientId) ? signedInUrl : defaultUrl;
-    // Add base params + signed in
-    url.search = searchParams.toString();
-    url.searchParams.append("utm_content", "signedIn");
+  /**
+   * Opens a product CTA, deep-linking users who already have the service
+   * attached to their Mozilla account and sending everyone else to the
+   * product's landing page.
+   *
+   * @param {string} clientId
+   *   The FxA OAuth client Id for the product being opened.
+   * @param {URL} defaultUrl
+   * @param {URL} signedInUrl
+   */
+  openCtaLink(clientId, defaultUrl, signedInUrl) {
+    const url =
+      this.isSignedIn && this.hasClientForId(clientId)
+        ? signedInUrl
+        : defaultUrl;
 
     this.openLink(url);
     PanelUI.hide();

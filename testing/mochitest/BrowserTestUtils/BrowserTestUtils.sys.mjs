@@ -25,6 +25,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 });
 
 XPCOMUtils.defineLazyServiceGetters(lazy, {
+  gfxInfo: ["@mozilla.org/gfx/info;1", Ci.nsIGfxInfo],
   ProtocolProxyService: [
     "@mozilla.org/network/protocol-proxy-service;1",
     Ci.nsIProtocolProxyService,
@@ -62,6 +63,25 @@ function describeMutationWait(checkFn, frame) {
     return source;
   }
   return `${frame.filename.replace(/.*\//, "")}:${frame.lineNumber} - ${source}`;
+}
+
+/**
+ * Gives a lazy tab the browser it was created without.
+ *
+ * @backward-compat { version 156 }
+ * `insertBrowser()` is new in 156, but the newtab train-hop jobs run these
+ * tests against Beta and Release builds, whose tabbrowser only has the
+ * underscored predecessor. Call it directly once 156 reaches Release.
+ *
+ * @param {object} tabbrowser
+ * @param {MozTabbrowserTab} tab
+ */
+function insertBrowser(tabbrowser, tab) {
+  if (tabbrowser.insertBrowser) {
+    tabbrowser.insertBrowser(tab);
+  } else {
+    tabbrowser._insertBrowser(tab);
+  }
 }
 
 /**
@@ -116,6 +136,21 @@ registerActors();
  * @class
  */
 export var BrowserTestUtils = {
+  /**
+   * Whether minimizing a window has any observable effect on this platform.
+   * Wayland offers no way to tell that a window was minimized, so neither a
+   * sizemodechange event nor the window's deactivation follows
+   * ``window.minimize()`` there. See bug 2063202.
+   *
+   * @returns {boolean}
+   */
+  get canMinimize() {
+    return !(
+      AppConstants.platform == "linux" &&
+      lazy.gfxInfo.windowProtocol == "wayland"
+    );
+  },
+
   // We define the function separately, rather than using an arrow function
   // inline due to https://github.com/jsdoc/jsdoc/issues/2143.
   /**
@@ -501,7 +536,7 @@ export var BrowserTestUtils = {
     if (tabbrowser && tabbrowser.getTabForBrowser) {
       let tab = tabbrowser.getTabForBrowser(browser);
       if (tab) {
-        tabbrowser._insertBrowser(tab);
+        insertBrowser(tabbrowser, tab);
       }
     }
 
@@ -1227,7 +1262,7 @@ export var BrowserTestUtils = {
         // Ensure all browsers have been inserted or we won't get
         // messages back from them.
         browserSet.forEach(browser => {
-          win.gBrowser._insertBrowser(win.gBrowser.getTabForBrowser(browser));
+          insertBrowser(win.gBrowser, win.gBrowser.getTabForBrowser(browser));
         });
 
         let observer = subject => {

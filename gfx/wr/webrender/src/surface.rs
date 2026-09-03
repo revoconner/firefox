@@ -187,8 +187,18 @@ pub struct SurfaceInfo {
     pub visibility_spatial_node_index: SpatialNodeIndex,
     /// The device pixel ratio specific to this surface.
     pub device_pixel_scale: DevicePixelScale,
-    /// The scale factors of the surface to world transform.
+    /// The scale factors of the surface to world transform. Child surfaces
+    /// multiply their own child-to-parent scale by this to obtain
+    /// child-to-device, so it must describe this surface's space all the way to
+    /// device space.
     pub world_scale_factors: (f32, f32),
+    /// The remaining per-axis scale from the space this surface rasterizes in to
+    /// device space, i.e. `local_scale * blur_scale_factors` is the surface's
+    /// full local-to-device scale. Only blur radius clamping uses it, and it is
+    /// kept separate from `world_scale_factors` because a root-snapping surface
+    /// rasterizes in root space (so this is one) while still needing to report a
+    /// real scale to its children.
+    pub blur_scale_factors: (f32, f32),
     /// Local scale factors surface to raster transform
     pub local_scale: (f32, f32),
     /// If true, we know this surface is completely opaque.
@@ -203,6 +213,14 @@ pub struct SurfaceInfo {
     pub allow_snapping: bool,
     /// If true, the scissor rect must be set when drawing this surface
     pub force_scissor_rect: bool,
+    /// For an SVGFEGraph surface, the mapping from the space the filter
+    /// subregions are authored in (the filtered element's spatial node) to this
+    /// surface's spatial node. Non-identity for backdrop filters, whose graph
+    /// composites in backdrop-root space; it is a full scale+offset because an
+    /// intervening reference frame may scale (e.g. pdf.js scales its text
+    /// spans), so a translation alone is not enough. All SVGFE coverage paths
+    /// map the subregions through this so they line up with the geometry.
+    pub svgfe_source_map: ScaleOffset,
 }
 
 impl SurfaceInfo {
@@ -213,6 +231,7 @@ impl SurfaceInfo {
         spatial_tree: &SpatialTree,
         device_pixel_scale: DevicePixelScale,
         world_scale_factors: (f32, f32),
+        blur_scale_factors: (f32, f32),
         local_scale: (f32, f32),
         allow_snapping: bool,
         force_scissor_rect: bool,
@@ -247,9 +266,11 @@ impl SurfaceInfo {
             visibility_spatial_node_index,
             device_pixel_scale,
             world_scale_factors,
+            blur_scale_factors,
             local_scale,
             allow_snapping,
             force_scissor_rect,
+            svgfe_source_map: ScaleOffset::identity(),
             // TODO: At the moment all culling is done in the root device space but
             // but the plan is to move it to raster space.
             culling_rect: global_culling_rect.cast_unit(),
@@ -270,8 +291,8 @@ impl SurfaceInfo {
         let sy_blur_radius = y_blur_radius * self.local_scale.1;
 
         let largest_scaled_blur_radius = f32::max(
-            sx_blur_radius * self.world_scale_factors.0,
-            sy_blur_radius * self.world_scale_factors.1,
+            sx_blur_radius * self.blur_scale_factors.0,
+            sy_blur_radius * self.blur_scale_factors.1,
         );
 
         if largest_scaled_blur_radius > MAX_BLUR_RADIUS {

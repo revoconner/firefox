@@ -1689,7 +1689,6 @@ void nsBlockFrame::Reflow(nsPresContext* aPresContext, ReflowOutput& aMetrics,
     nscoord mBlockCoord = 0;
 
     bool operator==(const BalanceTarget& aOther) const = default;
-    bool operator!=(const BalanceTarget& aOther) const = default;
   };
 
   BalanceTarget balanceTarget;
@@ -2328,7 +2327,8 @@ std::pair<nsBlockFrame*, nsLineBox*> FindLineClampTarget(
   return std::pair(targetFrame, targetLine);
 }
 
-nscoord nsBlockFrame::ApplyLineClamp(nscoord aContentBlockEndEdge) {
+nscoord nsBlockFrame::ApplyLineClamp(nscoord aContentBlockEndEdge,
+                                     nscoord aCollapsingBEndMargin) {
   auto* root = GetLineClampRoot();
   if (!root) {
     return aContentBlockEndEdge;
@@ -2354,6 +2354,7 @@ nscoord nsBlockFrame::ApplyLineClamp(nscoord aContentBlockEndEdge) {
       static_cast<nsBlockFrame*>(f)->SetHasLineClampEllipsisDescendant(true);
     }
     if (f == this) {
+      edge += aCollapsingBEndMargin;
       break;
     }
     if (f == root) {
@@ -2452,7 +2453,9 @@ nscoord nsBlockFrame::ComputeFinalSize(const ReflowInput& aReflowInput,
     // We don't care about ApplyLineClamp's return value (the line-clamped
     // content BSize) in this explicit-BSize codepath, but we do still need to
     // call ApplyLineClamp for ellipsis markers to be placed as-needed.
-    ApplyLineClamp(contentBSizeWithBStartBP);
+    // If we don't care about the size, also don't worry about providing
+    // the margin value.
+    ApplyLineClamp(contentBSizeWithBStartBP, 0);
 
     finalSize.BSize(wm) = ComputeFinalBSize(aState, contentBSizeWithBStartBP);
 
@@ -2499,7 +2502,7 @@ nscoord nsBlockFrame::ComputeFinalSize(const ReflowInput& aReflowInput,
     finalSize.BSize(wm) = aReflowInput.AvailableBSize();
   } else if (aState.mReflowStatus.IsComplete()) {
     const nscoord lineClampedContentBlockEndEdge =
-        ApplyLineClamp(blockEndEdgeOfChildren);
+        ApplyLineClamp(blockEndEdgeOfChildren, aState.mPrevBEndMargin.Get());
 
     const nscoord bpBStart = borderPadding.BStart(wm);
     const nscoord contentBSize = blockEndEdgeOfChildren - bpBStart;
@@ -5803,11 +5806,14 @@ bool nsBlockFrame::IsLastInlineLine(LineIterator aLine) {
 }
 
 bool nsBlockFrame::IsLastFormattedLine(LineIterator aLine) {
+  // Check if any later lines are non-empty/non-invisible
   for (LineIterator line = aLine.next(); line != LinesEnd(); ++line) {
     if (line->GetChildCount() > 0 && (line->IsBlock() || !line->IsPhantom())) {
       return false;
     }
   }
+
+  // Check if any continuations have non-empty/non-invisible lines
   nsBlockFrame* nextInFlow = (nsBlockFrame*)GetNextInFlow();
   while (nextInFlow) {
     for (const auto& line : nextInFlow->Lines()) {
@@ -5817,6 +5823,15 @@ bool nsBlockFrame::IsLastFormattedLine(LineIterator aLine) {
     }
     nextInFlow = (nsBlockFrame*)nextInFlow->GetNextInFlow();
   }
+
+  // Check if any child frames of this line have overflow frames
+  // that will be pulled into the next line when it is reflowed
+  for (nsIFrame* f : aLine->ChildFrames()) {
+    if (f->GetProperty(nsContainerFrame::OverflowProperty())) {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -7090,6 +7105,8 @@ static bool StyleEstablishesBFC(const ComputedStyle* aStyle) {
   return disp->IsContainPaint() || disp->IsContainLayout() ||
          disp->mContainerType &
              (StyleContainerType::SIZE | StyleContainerType::INLINE_SIZE) ||
+         (GetLineClampMaxLines(disp->mWebkitLineClamp) &&
+          !disp->mWebkitLineClamp.webkit_legacy) ||
          disp->DisplayInside() == StyleDisplayInside::FlowRoot ||
          disp->IsAbsolutelyPositionedStyle() || disp->IsFloatingStyle() ||
          aStyle->IsRootElementStyle() || AnonymousBoxIsBFC(aStyle);

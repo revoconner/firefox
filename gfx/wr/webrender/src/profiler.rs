@@ -31,7 +31,6 @@ use crate::renderer::{FullFrameStats, init::wr_has_been_initialized};
 use api::units::DeviceIntSize;
 use std::collections::vec_deque::VecDeque;
 use std::fmt::{Write, Debug};
-use std::f32;
 use std::ops::Range;
 use std::time::Duration;
 
@@ -1386,10 +1385,10 @@ pub trait ProfilerHooks : Send + Sync {
     fn unregister_thread(&self);
 
     /// Called at the beginning of a profile scope.
-    fn begin_marker(&self, label: &str);
+    fn begin_marker(&self, label: &str, text: &str);
 
     /// Called at the end of a profile scope.
-    fn end_marker(&self, label: &str);
+    fn end_marker(&self, label: &str, text: &str);
 
     /// Called to mark an event happening.
     fn event_marker(&self, label: &str);
@@ -1425,6 +1424,7 @@ pub fn set_profiler_hooks(hooks: Option<&'static dyn ProfilerHooks>) {
 /// A simple RAII style struct to manage a profile scope.
 pub struct ProfileScope {
     name: &'static str,
+    text: &'static str,
 }
 
 
@@ -1478,12 +1478,27 @@ impl ProfileScope {
     pub fn new(name: &'static str) -> Self {
         unsafe {
             if let Some(ref hooks) = PROFILER_HOOKS {
-                hooks.begin_marker(name);
+                hooks.begin_marker(name, "");
             }
         }
 
         ProfileScope {
             name,
+            text: "",
+        }
+    }
+
+    #[allow(unused)]
+    pub fn with_text(name: &'static str, text: &'static str) -> Self {
+        unsafe {
+            if let Some(ref hooks) = PROFILER_HOOKS {
+                hooks.begin_marker(name, text);
+            }
+        }
+
+        ProfileScope {
+            name,
+            text,
         }
     }
 }
@@ -1492,7 +1507,7 @@ impl Drop for ProfileScope {
     fn drop(&mut self) {
         unsafe {
             if let Some(ref hooks) = PROFILER_HOOKS {
-                hooks.end_marker(self.name);
+                hooks.end_marker(self.name, self.text);
             }
         }
     }
@@ -1504,12 +1519,19 @@ macro_rules! profile_marker {
     ($string:expr) => {
         let _scope = $crate::profiler::ProfileScope::new($string);
     };
+    ($string:expr, $text:expr) => {
+        let _scope = $crate::profiler::ProfileScope::with_text($string, $text);
+    };
 }
 
 #[cfg(feature="tracy")]
 /// A helper macro to define profile scopes.
 macro_rules! profile_marker {
     ($string:expr) => {
+        tracy_rs::profile_scope!($string)
+    };
+    ($string:expr, $text:expr) => {
+        // Just drop the extra text in the case of tracy.
         tracy_rs::profile_scope!($string)
     };
 }
@@ -1610,7 +1632,7 @@ impl Counter {
             unit: descriptor.unit,
             show_as: descriptor.show_as,
             expected: descriptor.expected.clone(),
-            value: std::f64::NAN,
+            value: f64::NAN,
             num_samples: 0,
             sum: 0.0,
             next_max: 0.0,
@@ -1700,7 +1722,7 @@ impl Counter {
             graph.set(self.value);
         }
 
-        self.value = std::f64::NAN;
+        self.value = f64::NAN;
 
         if update_avg {
             if self.num_samples > 0 {
@@ -1713,7 +1735,7 @@ impl Counter {
             }
             self.sum = 0.0;
             self.num_samples = 0;
-            self.next_max = std::f64::MIN;
+            self.next_max = f64::MIN;
         }
     }
 }

@@ -1776,7 +1776,7 @@ var gCSSProperties = {
     domProp: "MozAppearance",
     domPropDisabled: true, // Bug 1977489
     inherited: false,
-    type: CSS_TYPE_SHORTHAND_AND_LONGHAND,
+    type: CSS_TYPE_LEGACY_SHORTHAND,
     alias_for: "appearance",
     subproperties: ["appearance"],
   },
@@ -12430,6 +12430,50 @@ var gCSSProperties = {
     alias_for: "mask-size",
     subproperties: ["mask-size"],
   },
+  "view-transition-name": {
+    domProp: "viewTransitionName",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["none"],
+    other_values: [
+      "all",
+      "ball",
+      "mall",
+      "color",
+      "foobar",
+      "\\32bounce",
+      "-bounce",
+      "-\\32bounce",
+      "\\32 0bounce",
+      "-\\32 0bounce",
+      "\\2bounce",
+      "-\\2bounce",
+    ],
+    invalid_values: ["auto", "abc --bounce", "10px", "rgb(1, 2, 3)"],
+  },
+  "view-transition-class": {
+    domProp: "viewTransitionClass",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["none"],
+    other_values: [
+      "all",
+      "ball",
+      "mall",
+      "color",
+      "foobar",
+      "\\32bounce",
+      "-bounce",
+      "-\\32bounce",
+      "\\32 0bounce",
+      "-\\32 0bounce",
+      "\\2bounce",
+      "-\\2bounce",
+      "abc abc",
+      "\\32bounce abc",
+    ],
+    invalid_values: ["abc none", "10px", "rgb(1, 2, 3)", "default"],
+  },
 }; // end of gCSSProperties
 
 if (IsCSSPropertyPrefEnabled("layout.css.line-clamp.enabled")) {
@@ -13855,6 +13899,24 @@ if (false) {
       "2px",
     ],
   };
+
+  gCSSProperties["-moz-scrollbar-inset-block"] = {
+    // domProp: "MozScrollbarInsetBlock",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["0", "0 0"],
+    other_values: ["1px 2px", "calc(2em + 3ex)", "1px calc(2em)"],
+    invalid_values: ["auto", "20%", "-10px", "1px 2px 3px", "1px 2px 3px 4px"],
+  };
+
+  gCSSProperties["-moz-scrollbar-inset-inline"] = {
+    // domProp: "MozScrollbarInsetInline",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["0", "0 0"],
+    other_values: ["1px 2px", "calc(2em + 3ex)", "1px calc(2em)"],
+    invalid_values: ["auto", "20%", "-10px", "1px 2px 3px", "1px 2px 3px 4px"],
+  };
 }
 
 gCSSProperties["scrollbar-color"] = {
@@ -14586,55 +14648,6 @@ if (IsCSSPropertyPrefEnabled("layout.css.field-sizing.enabled")) {
       initial_values: ["fixed"],
       other_values: ["content"],
       invalid_values: ["none", "auto"],
-    },
-  });
-}
-
-if (IsCSSPropertyPrefEnabled("dom.viewTransitions.enabled")) {
-  Object.assign(gCSSProperties, {
-    "view-transition-name": {
-      domProp: "viewTransitionName",
-      inherited: false,
-      type: CSS_TYPE_LONGHAND,
-      initial_values: ["none"],
-      other_values: [
-        "all",
-        "ball",
-        "mall",
-        "color",
-        "foobar",
-        "\\32bounce",
-        "-bounce",
-        "-\\32bounce",
-        "\\32 0bounce",
-        "-\\32 0bounce",
-        "\\2bounce",
-        "-\\2bounce",
-      ],
-      invalid_values: ["auto", "abc --bounce", "10px", "rgb(1, 2, 3)"],
-    },
-    "view-transition-class": {
-      domProp: "viewTransitionClass",
-      inherited: false,
-      type: CSS_TYPE_LONGHAND,
-      initial_values: ["none"],
-      other_values: [
-        "all",
-        "ball",
-        "mall",
-        "color",
-        "foobar",
-        "\\32bounce",
-        "-bounce",
-        "-\\32bounce",
-        "\\32 0bounce",
-        "-\\32 0bounce",
-        "\\2bounce",
-        "-\\2bounce",
-        "abc abc",
-        "\\32bounce abc",
-      ],
-      invalid_values: ["abc none", "10px", "rgb(1, 2, 3)", "default"],
     },
   });
 }
